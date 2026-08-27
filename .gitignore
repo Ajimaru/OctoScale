@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# PlatformIO build output (also self-ignored via .pio/.gitignore)
+.pio/
+
+# Local secrets — never commit WiFi credentials or API keys
+secrets.h
+*.local.ini
