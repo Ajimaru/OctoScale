@@ -36,7 +36,7 @@
 #include "version.h"    // FW_VERSION, FW_BUILD
 #include "web_ui.h"     // INDEX_HTML (web UI HTML/CSS/JS)
 #include "octoprint.h"  // OctoPrint instances + tool count/load URL/spool info
-#include "spooldb.h"    // spoolExists() via the SpoolManager HTTP bridge (DB source)
+#include "spooldb.h"    // spoolExists() via the SpoolManagerExtended HTTP bridge (DB source)
 #include "backup.h"     // config backup/restore (AES-encrypted API keys)
 #include "display.h"    // ST7789 TFT
 #include "pn5180nfc.h"  // PN5180 NFC reader (SPI)
@@ -347,7 +347,7 @@ String g_nfcWriteErr = "";              // error text (task writes, handler read
 enum NfcWriteKind { NFCWRITE_ID, NFCWRITE_SPOOL, NFCWRITE_ERASE };
 volatile NfcWriteKind g_nfcWriteKind = NFCWRITE_ID;
 SpoolTagData g_nfcWriteSpoolData;          // filled by the HTTP handler before g_nfcWriteReq is set
-// Which of the two NFC-V Extended formats to use, per-request (SpoolManager plugin
+// Which of the two NFC-V Extended formats to use, per-request (SpoolManagerExtended plugin
 // setting, sent with every /nfcwritespool call) -- "extended" (default, OctoScale's own
 // binary layout) or "openSpool" (standard Type 5 NDEF, generic-phone-app readable).
 // Irrelevant for Mifare, which has only one Extended format.
@@ -364,7 +364,7 @@ String g_nfcWriteUid = "";                 // task writes: UID of the tag that w
 
 // Result handoff for the TFT result screen. g_nfcWriteDone can NOT be used for this:
 // it is cleared by the /nfcwritestatus handler (core 1) as soon as the caller polls,
-// and SpoolManager polls every 500ms. Since the blocking write runs inside pn5180Task
+// and SpoolManagerExtended polls every 500ms. Since the blocking write runs inside pn5180Task
 // -- the same task as menuTick() -- the flag is often already gone by the time the
 // menu gets its next tick, so a fast write (Mifare/NFC-V, ~2-3s) would show the "in
 // progress" screen and then no result at all. pn5180Task therefore latches the result
@@ -887,7 +887,7 @@ static void flowDoPrinter(int idx) {
   g_flowState = FLOW_ASK_TOOL;
 }
 
-// Tool chosen (n): call the SpoolManager load URL -> DONE/ERROR.
+// Tool chosen (n): call the SpoolManagerExtended load URL -> DONE/ERROR.
 static void flowDoTool(int n) {
   displayTouch();
   if (n < 0 || n >= g_flowToolCount) {
@@ -913,7 +913,7 @@ static void flowDoTool(int n) {
   }
 }
 
-// Reading confirmed: write the current scale weight to the SpoolManager DB.
+// Reading confirmed: write the current scale weight to the SpoolManagerExtended DB.
 static void flowDoWeighSave() {
   displayTouch();
   uint8_t idx = g_dbInstance < g_octoCount ? g_dbInstance : 0;
@@ -1680,7 +1680,7 @@ void startWebServer() {
     d.vendor     = String((const char *)(doc["vendor"]     | ""));
     d.color      = String((const char *)(doc["color"]      | ""));
     d.colorName  = String((const char *)(doc["colorName"]  | ""));
-    // Numeric fields: SpoolManager's own API returns weights as strings elsewhere in
+    // Numeric fields: SpoolManagerExtended's own API returns weights as strings elsewhere in
     // this codebase (see octoSpoolInfo's comment), but the plugin sends this payload
     // reading straight off the peewee model (native types, not through the string-
     // producing Transformer) -- so these arrive as JSON numbers. Accept both forms
@@ -1693,10 +1693,10 @@ void startWebServer() {
     d.temperature         = doc["temperature"]        | -1;
     d.bedTemperature      = doc["bedTemperature"]      | -1;
     d.enclosureTemperature = doc["enclosureTemperature"] | -1;
-    // Optional temperature range (SpoolManager's minTemperature/maxTemperature and
+    // Optional temperature range (SpoolManagerExtended's minTemperature/maxTemperature and
     // minBedTemperature/maxBedTemperature) -- independent of temperature/bedTemperature
     // above, which stay the target/default value, not the range's min (confirmed with
-    // the SpoolManager plugin session: temperature/minTemperature/maxTemperature are
+    // the SpoolManagerExtended plugin session: temperature/minTemperature/maxTemperature are
     // sent as three independent fields, potentially with three different values).
     d.temperatureMin    = doc["minTemperature"]    | -1;
     d.temperatureMax    = doc["maxTemperature"]    | -1;
@@ -1710,7 +1710,7 @@ void startWebServer() {
     d.offsetBedTemperature       = doc["offsetBedTemperature"]       | 0;
     d.offsetEnclosureTemperature = doc["offsetEnclosureTemperature"] | 0;
 
-    // octoscaleExtended v3 (Mifare Classic 1K) -- SpoolManager fields with no prior
+    // octoscaleExtended v3 (Mifare Classic 1K) -- SpoolManagerExtended fields with no prior
     // Extended-format equivalent. See HARDWARE.md's v3 section for the wire layout.
     d.remainingWeight = doc["remainingWeight"] | -1.0f;
     d.totalLength      = doc["totalLength"]     | -1L;
@@ -1736,7 +1736,7 @@ void startWebServer() {
     d.dryingTime        = doc["dryingTime"]        | -1;
     d.td                = doc["td"]                | -1.0f;
 
-    // TigerTag-only: pre-resolved registry IDs (SpoolManager owns the Material/Brand/
+    // TigerTag-only: pre-resolved registry IDs (SpoolManagerExtended owns the Material/Brand/
     // Aspect/Type/Diameter/MeasureUnit lookup, firmware just packs bytes). -1 = not
     // resolved.
     d.tigerTagMaterialId    = doc["tigerTagMaterialId"]    | -1L;
@@ -1754,7 +1754,7 @@ void startWebServer() {
     if (nfcvFmt != "openSpool" && nfcvFmt != "openPrintTag") nfcvFmt = "extended";
     // Same idea for NTAG -- "openSpool" (default) or "extended" (ntagExtended).
     // Separate parameter from preferredNfcvFormat: the value sets don't fully overlap
-    // (NFC-V has the extra "openPrintTag" option NTAG doesn't) and SpoolManager keeps
+    // (NFC-V has the extra "openPrintTag" option NTAG doesn't) and SpoolManagerExtended keeps
     // them as two independent settings, so a shared wire name would only reintroduce
     // an artificial coupling that isn't there on either side.
     String ntagFmt = String((const char *)(doc["preferredNtagFormat"] | "openSpool"));
@@ -1866,7 +1866,7 @@ void startWebServer() {
         // `warning` used to also append a raw, unformatted "<format> cannot store:
         // <rawKeys>" note here -- pure duplication of the already-structured
         // `unsupportedFields` array above, and worse to read (no field labels, comma-
-        // joined with no spaces). A client parsing unsupportedFields (as SpoolManager
+        // joined with no spaces). A client parsing unsupportedFields (as SpoolManagerExtended
         // does, with proper labels) got the same information twice, once garbled. Left
         // in only as the genuine truncation warning now; unsupportedFields is the sole
         // source for "fields this format can't store".
@@ -1963,7 +1963,7 @@ void startWebServer() {
     server.send(200, "application/json", flowStatusJson());
   });
 
-  // Reading confirmed -> write it to the SpoolManager DB via PUT
+  // Reading confirmed -> write it to the SpoolManagerExtended DB via PUT
   server.on("/flow/weigh", []() {
     if (g_flowState != FLOW_WEIGH_CONFIRM) {
       server.send(409, "text/plain", "Wrong flow state");
@@ -1996,7 +1996,7 @@ void startWebServer() {
     server.send(200, "application/json", flowStatusJson());
   });
 
-  // Tool chosen: ?n=<N> -> call the SpoolManager load URL -> DONE/ERROR
+  // Tool chosen: ?n=<N> -> call the SpoolManagerExtended load URL -> DONE/ERROR
   server.on("/flow/tool", []() {
     if (g_flowState != FLOW_ASK_TOOL) {
       server.send(409, "text/plain", "Wrong flow state");
@@ -2079,7 +2079,7 @@ void startWebServer() {
     server.send(200, "application/json", out);
   });
 
-  // Fetch an instance's DB identity (SpoolManager databaseInfo): ?idx=<i>
+  // Fetch an instance's DB identity (SpoolManagerExtended databaseInfo): ?idx=<i>
   // Returns external + dbId, to see which instances share the same DB.
   server.on("/octoprint/dbinfo", []() {
     if (!server.hasArg("idx")) {
@@ -2179,7 +2179,7 @@ void startWebServer() {
     server.send(200, "application/json", octoListJson());
   });
 
-  // ---- Spool DB source (via the SpoolManager HTTP bridge) -------------------
+  // ---- Spool DB source (via the SpoolManagerExtended HTTP bridge) -------------------
   server.on("/db/get", []() {
     server.send(200, "application/json", dbCfgJson());
   });
@@ -2198,7 +2198,7 @@ void startWebServer() {
     server.send(200, "application/json", dbCfgJson());
   });
 
-  // Test a spool lookup directly: ?id=<N> -> checks spoolExists via SpoolManager.
+  // Test a spool lookup directly: ?id=<N> -> checks spoolExists via SpoolManagerExtended.
   // Useful during setup without a physical tag.
   server.on("/db/test", []() {
     long id = server.hasArg("id") ? server.arg("id").toInt() : 1;
@@ -2614,7 +2614,7 @@ static void flowOnTagPresent(long id, const String &uid) {
     g_flowSpoolId = id;
     dbgLogf("Flow: tag present, databaseId=%ld -> DB check", id);
   } else if (uid.length()) {
-    // No databaseId payload -> try resolving the tag by its UID (SpoolManager `code`).
+    // No databaseId payload -> try resolving the tag by its UID (SpoolManagerExtended `code`).
     g_flowLookupByCode = true;
     g_flowLookupUid = uid;
     g_flowSpoolId = -1;
@@ -2901,7 +2901,7 @@ void pn5180Task(void *param) {
       // Force the lock screen onto the TFT for THIS write before the blocking call
       // below runs. menuTick() at the top of the loop only sees g_nfcWritePending if
       // some earlier iteration happened to catch it first -- back-to-back writes (e.g.
-      // SpoolManager firing the next /nfcwritespool right away) can have pn5180Task pick
+      // SpoolManagerExtended firing the next /nfcwritespool right away) can have pn5180Task pick
       // up g_nfcWriteReq in the SAME iteration that g_nfcWritePending went true, before
       // menuTick ever saw it. Without this extra call, the screen would then stay on
       // whatever was showing (e.g. the spool-assign screen) straight through the write
@@ -3478,7 +3478,7 @@ void loop() {
   ArduinoOTA.handle();
   server.handleClient();
   buzzerTick();   // advance the buzzer sequence from the loop context too
-  // The DB check runs here (loop task), not in pn5180Task: the SpoolManager HTTP
+  // The DB check runs here (loop task), not in pn5180Task: the SpoolManagerExtended HTTP
   // bridge call blocks briefly and shouldn't hold up the reader task. Only on a new
   // tag with a valid ID.
   if (g_flowDbRequest) runDbCheck();

@@ -348,7 +348,7 @@ static const char INDEX_HTML[] PROGMEM =
     "<button type='submit' class='primary'>Add printer</button></form>"
     "<button onclick='dbrefresh(event)' class='ghost'>Refresh DB info</button></div>"
     "<div class='card'><h2>Spool database</h2>"
-    "<div class='msg'>Spools come from SpoolManager. Pick the preferred "
+    "<div class='msg'>Spools come from SpoolManagerExtended. Pick the preferred "
     "OctoPrint instance as the DB source. If it is offline, another instance with a "
     "<b>shared external DB</b> (&#x1F5C4;&#xFE0F;) takes over. Local SQLite "
     "(&#x1F4BE;) has no fallback.</div>"
@@ -456,7 +456,7 @@ static const char INDEX_HTML[] PROGMEM =
     "</div>"
     "<div class='card span'><h2>Debug console</h2>"
     "<div class='msg'>Live firmware trace &ndash; NFC tag reads/writes, OctoPrint and "
-    "SpoolManager requests, load-flow steps, menu navigation and scale readings. Kept "
+    "SpoolManagerExtended requests, load-flow steps, menu navigation and scale readings. Kept "
     "in an in-RAM ring buffer of the last 400 lines; older lines are dropped. Off by "
     "default and nothing is recorded while it is off, so switch it on before "
     "reproducing an issue.</div>"
@@ -631,8 +631,8 @@ static const char INDEX_HTML[] PROGMEM =
     "if(has&&ext){"
     "var nn=function(v,s){return v===undefined||v===null||v===-1||v===-1.0?'not set':v+(s||'');};"
     // Days-since-epoch (1970-01-01 UTC) -> 'DD.MM.YYYY', same display format
-    // SpoolManager's own UI uses (%d.%m.%Y) -- keeps the two UIs showing the
-    // same date instead of OctoScale's raw wire integer next to SpoolManager's
+    // SpoolManagerExtended's own UI uses (%d.%m.%Y) -- keeps the two UIs showing the
+    // same date instead of OctoScale's raw wire integer next to SpoolManagerExtended's
     // formatted one.
     "var nd=function(v){if(v===undefined||v===null||v<0)return'not set';"
     "var d=new Date(v*86400000);"
@@ -653,7 +653,7 @@ static const char INDEX_HTML[] PROGMEM =
     "document.getElementById('netemp2').textContent=nn(ext.enclosureTemperature,' \\u00b0C');"
     // octoscaleExtended v3 (Mifare Classic 1K only so far). Dates are days-since-epoch
     // on the wire (see HARDWARE.md's v3 section) but rendered as DD.MM.YYYY via nd()
-    // above, matching SpoolManager's own display format (%d.%m.%Y).
+    // above, matching SpoolManagerExtended's own display format (%d.%m.%Y).
     "document.getElementById('nedn').textContent=ext.displayName||'--';"
     "document.getElementById('nerw').textContent=nn(ext.remainingWeight,' g');"
     "document.getElementById('netl').textContent=nn(ext.totalLength,' mm');"
@@ -713,7 +713,7 @@ static const char INDEX_HTML[] PROGMEM =
     "if(o.enabled)dbgpoll();});}"
     // ---- Load flow ----
     "var lastState='';"
-    // Color CSS matching SpoolManager (_buildSpoolColorCss / spmSpoolColorCss). Code
+    // Color CSS matching SpoolManagerExtended (_buildSpoolColorCss / spmSpoolColorCss). Code
     // formats: "rainbow" | "transparent" | "transparent:#hex[;#hex..]" | "#hex[;#hex;#hex]"
     "function spmColorCss(cv){if(!cv)return'';cv=(''+cv).trim();"
     "if(cv.toLowerCase()==='rainbow')return'linear-gradient(135deg,#ff2d2d 0%,#ff9a00 20%,#ffe600 40%,#16c172 60%,#2f7bff 80%,#a044ff 100%)';"

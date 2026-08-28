@@ -48,7 +48,7 @@ static const int OPT_AUX_SIZE = 32;    // spec: SHALL be >=16 B if present, 32 B
 // --- Field keys (main_fields.yaml) ----------------------------------------------
 // Only the subset OctoScale can actually fill from SpoolTagData -- the spec defines
 // far more (GTIN, UUIDs, drying parameters, SLA-specific fields, ...) that have no
-// source in SpoolManager's data model today.
+// source in SpoolManagerExtended's data model today.
 enum OptFieldKey {
   OPT_K_MATERIAL_CLASS = 8,             // enum, required -- OctoScale always writes 0 (FFF)
   OPT_K_MATERIAL_TYPE = 9,              // enum, recommended -- see optMaterialTypeEnum()
@@ -545,7 +545,7 @@ inline bool optWrite(const uint8_t uid[8], const SpoolTagData &d, String &errOut
   if (d.density >= 0) n++;
   if (d.diameter >= 0) n++;
   // SpoolTagData's sentinel for "not set" is -1 (see its own field comments), not
-  // some physically-impossible temperature -- -1 deg C is itself a value SpoolManager
+  // some physically-impossible temperature -- -1 deg C is itself a value SpoolManagerExtended
   // could legitimately send (e.g. a cold-chamber material), so this can't distinguish
   // "unset" from "explicitly minus one" any better than the rest of the codebase does;
   // it's the same convention every other write path in pn5180nfc.h already relies on.

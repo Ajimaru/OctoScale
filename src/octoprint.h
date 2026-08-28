@@ -9,7 +9,7 @@
 // JSON array in NVS (namespace "octoscale", key "octoInstances"), plus the two API
 // calls the load flow needs:
 //   1. octoToolCount()  — how many tools/extruders the printer has (live)
-//   2. octoLoadSpool()  — tell SpoolManager to load the spool into tool N
+//   2. octoLoadSpool()  — tell SpoolManagerExtended to load the spool into tool N
 //      (endpoint from PR #59: selectSpoolByQRCode/<id>?tool=<N>)
 //
 // All calls run from the HTTP handler context (loop/core 1) with a short timeout, so
@@ -22,7 +22,7 @@ struct OctoInstance {
   String host;
   uint16_t port = 80;
   String apikey;
-  // DB identity, auto-detected via the SpoolManager /databaseInfo endpoint and cached
+  // DB identity, auto-detected via the SpoolManagerExtended /databaseInfo endpoint and cached
   // (persisted in NVS). Two instances with the same non-empty dbId share the same
   // external DB -> allowed to fall back for each other. Empty = local SQLite or not
   // yet known -> never a fallback for another instance.
@@ -191,8 +191,8 @@ inline int octoToolCount(uint8_t idx, String &errOut) {
   return count;
 }
 
-// Fetches an instance's DB identity (SpoolManager's databaseInfo endpoint).
-// Endpoint: GET /plugin/SpoolManager/databaseInfo -> {external:bool, dbId:string|null}
+// Fetches an instance's DB identity (SpoolManagerExtended's databaseInfo endpoint).
+// Endpoint: GET /plugin/SpoolManagerExtended/databaseInfo -> {external:bool, dbId:string|null}
 // dbId identifies the external DB (type://host:port/name, no credentials). Two
 // instances with the same non-empty dbId share a DB -> allowed to fall back for each
 // other. external=false / dbId empty -> local SQLite, never shareable.
@@ -210,7 +210,7 @@ inline int octoDbInfo(uint8_t idx, String &dbIdOut, bool &externalOut, String &e
   HTTPClient http;
   http.setConnectTimeout(3000);
   http.setTimeout(4000);
-  String url = octoBaseUrl(inst) + "/plugin/SpoolManager/databaseInfo";
+  String url = octoBaseUrl(inst) + "/plugin/SpoolManagerExtended/databaseInfo";
   if (!http.begin(url)) {
     errOut = "HTTP begin failed";
     return -1;
@@ -260,8 +260,8 @@ inline int octoRefreshDbIds() {
   return updated;
 }
 
-// Checks via SpoolManager whether a spool (databaseId) exists.
-// Endpoint: GET /plugin/SpoolManager/spool/<id> (API-key protected).
+// Checks via SpoolManagerExtended whether a spool (databaseId) exists.
+// Endpoint: GET /plugin/SpoolManagerExtended/spool/<id> (API-key protected).
 //   200 -> exists, displayName from JSON {spool:{displayName:...}}
 //   404 -> unknown
 // Returns: 1=found, 0=not found, -1=error (errOut set).
@@ -269,7 +269,7 @@ inline int octoRefreshDbIds() {
 // spoolWeightOut/totalWeightOut are optional and provide the reference values for the
 // weigh flow: without the empty weight, the remaining filament can't be derived from
 // the scale's gross reading. -1 means "not set in the record".
-// NOTE: SpoolManager returns weights as *strings* ("1000.0"), not JSON numbers -> read
+// NOTE: SpoolManagerExtended returns weights as *strings* ("1000.0"), not JSON numbers -> read
 // via `| "0"` as a const char* and convert manually, otherwise ArduinoJson silently
 // returns the default for `| -1.0f`.
 inline int octoSpoolInfo(uint8_t idx, long databaseId, String &nameOut,
@@ -295,7 +295,7 @@ inline int octoSpoolInfo(uint8_t idx, long databaseId, String &nameOut,
   HTTPClient http;
   http.setConnectTimeout(3000);
   http.setTimeout(4000);
-  String url = octoBaseUrl(inst) + "/plugin/SpoolManager/spool/" + String(databaseId);
+  String url = octoBaseUrl(inst) + "/plugin/SpoolManagerExtended/spool/" + String(databaseId);
   if (!http.begin(url)) {
     errOut = "HTTP begin failed";
     return -1;
@@ -310,7 +310,7 @@ inline int octoSpoolInfo(uint8_t idx, long databaseId, String &nameOut,
   }
   if (code != HTTP_CODE_OK) {
     http.end();
-    errOut = "SpoolManager HTTP " + String(code);
+    errOut = "SpoolManagerExtended HTTP " + String(code);
     return -1;
   }
   String body = http.getString();
@@ -347,8 +347,8 @@ inline int octoSpoolInfo(uint8_t idx, long databaseId, String &nameOut,
 
 // Resolves a spool by its NFC tag UID instead of databaseId — for foreign/manufacturer
 // tags (e.g. Snapmaker U1) that carry no OctoScale databaseId payload, only a raw UID.
-// Endpoint: GET /plugin/SpoolManager/spool/byCode/<uid> (mirrors octoSpoolInfo's
-// /spool/<id>; matches SpoolManager's `code` field, same string SpoolManager's own
+// Endpoint: GET /plugin/SpoolManagerExtended/spool/byCode/<uid> (mirrors octoSpoolInfo's
+// /spool/<id>; matches SpoolManagerExtended's `code` field, same string SpoolManagerExtended's own
 // U1RfidManager.normalizeCardUid() produces — uppercase hex, no separators).
 // Returns: 1=found (databaseIdOut set), 0=not found, -1=error (errOut set).
 inline int octoSpoolInfoByCode(uint8_t idx, const String &uid, long &databaseIdOut,
@@ -376,7 +376,7 @@ inline int octoSpoolInfoByCode(uint8_t idx, const String &uid, long &databaseIdO
   HTTPClient http;
   http.setConnectTimeout(3000);
   http.setTimeout(4000);
-  String url = octoBaseUrl(inst) + "/plugin/SpoolManager/spool/byCode/" + uid;
+  String url = octoBaseUrl(inst) + "/plugin/SpoolManagerExtended/spool/byCode/" + uid;
   if (!http.begin(url)) {
     errOut = "HTTP begin failed";
     return -1;
@@ -391,7 +391,7 @@ inline int octoSpoolInfoByCode(uint8_t idx, const String &uid, long &databaseIdO
   }
   if (code != HTTP_CODE_OK) {
     http.end();
-    errOut = "SpoolManager HTTP " + String(code);
+    errOut = "SpoolManagerExtended HTTP " + String(code);
     return -1;
   }
   String body = http.getString();
@@ -423,7 +423,7 @@ inline int octoSpoolInfoByCode(uint8_t idx, const String &uid, long &databaseIdO
 }
 
 // Writes back a gross weight (spool + filament) measured on the scale.
-// Endpoint: PUT /plugin/SpoolManager/spool/<id>/measuredWeight  {"grossWeight": <g>}
+// Endpoint: PUT /plugin/SpoolManagerExtended/spool/<id>/measuredWeight  {"grossWeight": <g>}
 // The plugin subtracts the empty weight itself and converts to usedWeight; the scale
 // doesn't need to know anything about the spool for this.
 // Returns true = saved. On 400 the reasons are in the body as validationErrors and are
@@ -440,7 +440,7 @@ inline bool octoSetMeasuredWeight(uint8_t idx, long databaseId, float grossWeigh
   HTTPClient http;
   http.setConnectTimeout(3000);
   http.setTimeout(5000);
-  String url = octoBaseUrl(inst) + "/plugin/SpoolManager/spool/" +
+  String url = octoBaseUrl(inst) + "/plugin/SpoolManagerExtended/spool/" +
                String(databaseId) + "/measuredWeight";
   if (!http.begin(url)) {
     errOut = "HTTP begin failed";
@@ -480,12 +480,12 @@ inline bool octoSetMeasuredWeight(uint8_t idx, long databaseId, float grossWeigh
       }
     }
   }
-  errOut = "SpoolManager HTTP " + String(code);
+  errOut = "SpoolManagerExtended HTTP " + String(code);
   return false;
 }
 
-// Tells SpoolManager to load the spool (databaseId) into tool N.
-// Endpoint (PR #59): GET /plugin/SpoolManager/selectSpoolByQRCode/<id>?tool=<N>
+// Tells SpoolManagerExtended to load the spool (databaseId) into tool N.
+// Endpoint (PR #59): GET /plugin/SpoolManagerExtended/selectSpoolByQRCode/<id>?tool=<N>
 // This is a server-side redirect GET; 2xx OR 3xx counts as success.
 inline bool octoLoadSpool(uint8_t idx, long databaseId, int tool, String &errOut) {
   errOut = "";
@@ -498,7 +498,7 @@ inline bool octoLoadSpool(uint8_t idx, long databaseId, int tool, String &errOut
   http.setConnectTimeout(3000);
   http.setTimeout(5000);
   http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);  // redirect = success
-  String url = octoBaseUrl(inst) + "/plugin/SpoolManager/selectSpoolByQRCode/" +
+  String url = octoBaseUrl(inst) + "/plugin/SpoolManagerExtended/selectSpoolByQRCode/" +
                String(databaseId) + "?tool=" + String(tool);
   if (!http.begin(url)) {
     errOut = "HTTP begin failed";
@@ -510,6 +510,6 @@ inline bool octoLoadSpool(uint8_t idx, long databaseId, int tool, String &errOut
   http.end();
   dbgLogf("HTTP GET %s -> %d", url.c_str(), code);
   if (code >= 200 && code < 400) return true;
-  errOut = "SpoolManager HTTP " + String(code);
+  errOut = "SpoolManagerExtended HTTP " + String(code);
   return false;
 }

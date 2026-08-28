@@ -5,13 +5,13 @@
 
 // spooldb.h — checks whether a spool (databaseId) is known.
 //
-// Uses an HTTP bridge through SpoolManager instead of direct DB access: the existing,
-// API-key-protected endpoint GET /plugin/SpoolManager/spool/<id> returns the spool
-// (200) or 404. SpoolManager handles the DB access itself — no DB driver or password
+// Uses an HTTP bridge through SpoolManagerExtended instead of direct DB access: the existing,
+// API-key-protected endpoint GET /plugin/SpoolManagerExtended/spool/<id> returns the spool
+// (200) or 404. SpoolManagerExtended handles the DB access itself — no DB driver or password
 // on the ESP (see HARDWARE.md for why direct MySQL access was abandoned).
 //
 // The DB source is one of the configured OctoPrint instances (g_dbInstance, default
-// 0). Since all instances typically share the same SpoolManager DB, one is enough.
+// 0). Since all instances typically share the same SpoolManagerExtended DB, one is enough.
 
 static uint8_t g_dbInstance = 0;  // index of the OctoPrint instance used as the DB source
 
@@ -43,7 +43,7 @@ inline String dbCfgJson() {
 // diagnostics/UI.
 static int g_dbUsedInstance = -1;
 
-// Checks whether a spool with the given databaseId exists (via the SpoolManager HTTP
+// Checks whether a spool with the given databaseId exists (via the SpoolManagerExtended HTTP
 // bridge). On a hit, displayName is written to nameOut.
 //
 // FALLBACK LOGIC (against an offline DB source): try the primary instance
@@ -104,7 +104,7 @@ inline bool spoolExists(long id, String &nameOut, String &errOut,
   return false;
 }
 
-// Same as spoolExists(), but resolves by NFC tag UID (SpoolManager's `code` field)
+// Same as spoolExists(), but resolves by NFC tag UID (SpoolManagerExtended's `code` field)
 // instead of databaseId — for foreign/manufacturer tags (e.g. Snapmaker U1) that carry
 // no OctoScale databaseId payload. On a hit, idOut carries the spool's real databaseId
 // so the rest of the flow (load/tool/weigh) can proceed exactly as with a native tag.

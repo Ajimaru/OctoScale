@@ -128,7 +128,7 @@ static const uint8_t NFCV_BLOCK_SIZE = 4;
 
 // --- NTAG Extended layout (NTAG215/216 only -- 213's ~144 B usable can't fit the v3
 // field set, see the capacity comment on pn5180WriteNtagExtended; offered as a
-// SpoolManager write-format preference alongside openSpool, mirroring NFC-V's existing
+// SpoolManagerExtended write-format preference alongside openSpool, mirroring NFC-V's existing
 // nfcvExtended/nfcvOpenSpool choice). No NDEF wrapper (Extended isn't meant to be read
 // by a generic phone NFC app, same reasoning as Mifare's own Extended format) -- pages
 // are written directly starting at page 4 (the first user page; pages 0-3 are
@@ -176,7 +176,7 @@ static const uint8_t NTAG_EXT_MAGIC2_1 = 'X';
 static const int NTAG_EXT_CRC_LEN = (NTAG_EXT_PAGE_CRC - NTAG_EXT_PAGE_START) * 4;
 
 // --- TigerTag Standard layout (foreign format, NOT our own -- byte-for-byte per the
-// TigerTag-SDK-Python, Apache-2.0, tigertag/tag.py, as relayed by the SpoolManager
+// TigerTag-SDK-Python, Apache-2.0, tigertag/tag.py, as relayed by the SpoolManagerExtended
 // peer session and cross-checked against their own tested read-parser). All
 // multi-byte fields BIG-ENDIAN, unlike every OctoScale-native NTAG/Mifare layout
 // above (little-endian) -- do not reuse pn5180ScaleU16/pn5180ScaleU24 here, their
@@ -209,7 +209,7 @@ struct SpoolTagData {
   float totalWeight = -1, spoolWeight = -1, usedWeight = -1;  // g
   int temperature = -1, bedTemperature = -1, enclosureTemperature = -1;      // deg C
   int offsetTemperature = 0, offsetBedTemperature = 0, offsetEnclosureTemperature = 0;  // signed, deg C
-  // Optional range around temperature/bedTemperature (SpoolManager's minTemperature/
+  // Optional range around temperature/bedTemperature (SpoolManagerExtended's minTemperature/
   // maxTemperature/minBedTemperature/maxBedTemperature) -- temperature/bedTemperature
   // themselves stay the independent "target" value, not the range's min.
   int temperatureMin = -1, temperatureMax = -1;
@@ -221,7 +221,7 @@ struct SpoolTagData {
   String code = "", batchNumber = "", purchasedFrom = "", finish = "", displayName = "";
   long firstUse = -1, lastUse = -1, purchasedOn = -1;  // days since 1970-01-01
   // Time of day for the three dates above, 0..1439 (-1 = not set), stored SEPARATELY
-  // from the day count rather than folded into it. SpoolManager's dates carry a real
+  // from the day count rather than folded into it. SpoolManagerExtended's dates carry a real
   // time (13 of 13 used spools in their test DB had one), which used to be truncated on
   // write -- so every rewrite of an unchanged spool showed a date diff. Minutes since
   // the epoch would be the obvious encoding and is the one to avoid: it is ~29.8M today,
@@ -244,7 +244,7 @@ struct SpoolTagData {
 
   // TigerTag-only: pre-resolved IDs into TigerTag's own Material/Brand/Aspect/Type/
   // Diameter/MeasureUnit registries. The firmware does NOT own or look up this
-  // registry -- the caller (SpoolManager) resolves text values to these IDs before
+  // registry -- the caller (SpoolManagerExtended) resolves text values to these IDs before
   // sending, same "plugin resolves, firmware just packs bytes" split already used
   // for every other format. -1 = not resolved/not set.
   long tigerTagMaterialId = -1, tigerTagBrandId = -1, tigerTagAspectId = -1;
@@ -264,7 +264,7 @@ inline uint8_t pn5180Crc8(const uint8_t *data, int len) {
   return crc;
 }
 
-// Parses the first color out of SpoolManager's `color` field: "#rrggbb", optionally
+// Parses the first color out of SpoolManagerExtended's `color` field: "#rrggbb", optionally
 // followed by more colors separated by ';' (multi-color spools -- only the first is
 // storable in the 3-byte RGB slot), or a sentinel like "rainbow"/"transparent[:#hex]"
 // (neither has a single RGB value -- returns false, caller leaves the RGB bytes zeroed).
@@ -566,7 +566,7 @@ inline bool pn5180ProbeNfcA(PN5180ProbeResult &out) {
   // treated it as a new tag and refilled the extended-read cache with unreadable data
   // (hasExtended 1 -> 0, id 103 -> -1 on a tag that never moved, plus a pointless
   // byCode HTTP lookup and a "spool gone" flicker on the TFT); and via g_pn5180Uid it
-  // reached /nfcwritestatus, where SpoolManager derives rfidTagKey from it -- a
+  // reached /nfcwritestatus, where SpoolManagerExtended derives rfidTagKey from it -- a
   // truncated UID yields a well-formed but WRONG key, which their teach-in wrote
   // straight to the database, permanently unlinking the tag. Report it as "no tag"
   // instead: a partial anticollision run is a failed read, not a new tag.
@@ -2437,14 +2437,14 @@ inline bool pn5180ReadNfcvExtended(const uint8_t uid[8], SpoolTagData &out) {
 // Alternative to openSpool for NTAG tags: OctoScale's own binary layout (full v3 field
 // set), same tradeoff as nfcvExtended vs. nfcvOpenSpool -- not readable by a generic
 // phone NFC app, but no JSON/NDEF text overhead eating into the byte budget. Chosen
-// per-write by the caller (SpoolManager plugin setting, mirrors nfcvFormat) via
+// per-write by the caller (SpoolManagerExtended plugin setting, mirrors nfcvFormat) via
 // ntagFormat="extended"/"openSpool" on pn5180WriteSpoolTag. See the NTAG_EXT_* layout
 // comment above for the exact page-by-page byte layout.
 //
 // Capacity gate: NTAG213's ~144 B usable can't fit this layout (20 B fixed pages +
 // magic/commit-marker pages + at minimum a handful of length-prefix bytes even with
 // every string empty leaves well under 100 B for 8 strings) -- callers should not
-// offer this format for a 213 in the first place (SpoolManager plans to gray the
+// offer this format for a 213 in the first place (SpoolManagerExtended plans to gray the
 // option out using capacityBytes from /nfcprobe), but this function itself also
 // refuses outright on a 213 as a hard backstop, same "fail loud, not silently" stance
 // as pn5180WriteMifareExtended's databaseId check.
@@ -2640,7 +2640,7 @@ inline bool pn5180WriteNtagExtended(const SpoolTagData &d, int &bytesWrittenOut,
 inline bool pn5180WriteNtagTigerTag(const SpoolTagData &d, int &bytesWrittenOut,
                                     String &errOut) {
   errOut = ""; bytesWrittenOut = 0;
-  // tigerTagAspectId is the one optional ID of the six: SpoolManager's own payload
+  // tigerTagAspectId is the one optional ID of the six: SpoolManagerExtended's own payload
   // builder deliberately leaves it null/unresolved for any spool with no Finish set,
   // which field testing confirmed is the common case, not an edge case (see the
   // TigerTag write-support conversation). Written as 0 when unset -- same byte the
@@ -2911,7 +2911,7 @@ inline bool pn5180ReadNtagExtended(SpoolTagData &out) {
 // Alternative to nfcvExtended for NFC-V tags: standard Type 5 NDEF instead of
 // OctoScale's own binary layout, so a phone (Android/iOS, both read T5T natively) can
 // read the spool with a generic NFC app, same tradeoff as openSpool on NTAG. Chosen
-// per-write by the caller (SpoolManager plugin setting, see pn5180WriteSpoolTag's
+// per-write by the caller (SpoolManagerExtended plugin setting, see pn5180WriteSpoolTag's
 // nfcvFormat param) -- NOT auto-detected from tag capacity, since either format fits
 // on any tag this project targets; it's purely a compatibility preference.
 //

@@ -283,7 +283,7 @@ static void menuCenterTick() {
       g_tft.drawString(buf, w / 2, 154, 4);
       // What the real (debug-off) flow would use this tag for -- id (green, would use
       // the normal load flow) or no id -> UID lookup fallback (amber, needs a spool
-      // taught with code=<this UID> in SpoolManager). Replaces the product-name line
+      // taught with code=<this UID> in SpoolManagerExtended). Replaces the product-name line
       // (still in /nfcprobe's JSON) -- no more vertical room above the footer.
       // g_nfcProbe.idParsed alone is the LEGACY-area id -- OpenSpool/nfcvOpenSpool/OPT
       // overwrite that area with their own NDEF content, so idParsed reads back -1 on
@@ -342,7 +342,7 @@ static void menuCenterTick() {
   g_tft.setTextDatum(TL_DATUM);
 }
 
-// --- Color swatch (SpoolManager color code -> TFT tile) ---------------------
+// --- Color swatch (SpoolManagerExtended color code -> TFT tile) ---------------------
 // Code formats: "#rrggbb", up to 3 ";"-separated, "rainbow", "transparent" or
 // "transparent:#hex[;..]". Rendered as: solid -> fill, multi -> vertical stripes,
 // rainbow -> 6 fixed stripes, transparent -> checkerboard (optionally tinted).
@@ -1284,7 +1284,7 @@ inline void menuTick(long delta, bool push, bool start) {
   }
   // Result available (Done): show it for a fixed window, drawn ONCE, independent of
   // whether/when an HTTP caller polls /nfcwritestatus. Writes vary wildly in duration
-  // (Mifare/NFC-V ~1-3s vs. NTAG's NDEF write ~20s) and SpoolManager polls every
+  // (Mifare/NFC-V ~1-3s vs. NTAG's NDEF write ~20s) and SpoolManagerExtended polls every
   // 500ms, so tying the screen to Pending meant fast writes could clear before the
   // result was even visible, while flickering the whole time it stayed up (this
   // branch used to call menuRenderNfcWrite()/menuMessage() every tick unconditionally

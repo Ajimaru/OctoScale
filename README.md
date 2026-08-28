@@ -285,11 +285,11 @@ talks to these endpoints, most of which exist only in the Extended plugin:
 
 | Endpoint | Used for |
 | --- | --- |
-| `GET /plugin/SpoolManager/spool/<id>` | look a spool up by the id stored on the tag |
-| `GET /plugin/SpoolManager/spool/byCode/<uid>` | look a foreign tag up by its UID |
-| `PUT /plugin/SpoolManager/spool/<id>/measuredWeight` | write the weighed value back |
-| `GET /plugin/SpoolManager/selectSpoolByQRCode/<id>?tool=<n>` | load a spool into a printer/tool |
-| `GET /plugin/SpoolManager/databaseInfo` | identify the database behind an instance (used for failover) |
+| `GET /plugin/SpoolManagerExtended/spool/<id>` | look a spool up by the id stored on the tag |
+| `GET /plugin/SpoolManagerExtended/spool/byCode/<uid>` | look a foreign tag up by its UID |
+| `PUT /plugin/SpoolManagerExtended/spool/<id>/measuredWeight` | write the weighed value back |
+| `GET /plugin/SpoolManagerExtended/selectSpoolByQRCode/<id>?tool=<n>` | load a spool into a printer/tool |
+| `GET /plugin/SpoolManagerExtended/databaseInfo` | identify the database behind an instance (used for failover) |
 
 All calls are API-key protected. Database access goes exclusively through this HTTP
 bridge — OctoScale never talks to MySQL directly (the Arduino MySQL library crashes
@@ -318,7 +318,7 @@ no weight written back — the scale becomes a scale with an NFC reader attached
 | `src/openprinttag.h`, `src/cbor.h` | OpenPrintTag support + a minimal CBOR codec |
 | `src/menu.h`, `src/display.h`, `src/encoder.h` | TFT menu, ST7789 driver, EC11 input |
 | `src/web_ui.h` | Web UI as a PROGMEM HTML string |
-| `src/octoprint.h`, `src/spooldb.h` | OctoPrint instances, SpoolManager lookups, DB failover |
+| `src/octoprint.h`, `src/spooldb.h` | OctoPrint instances, SpoolManagerExtended lookups, DB failover |
 | `src/backup.h` | Encrypted config backup/restore |
 | `lib/PN5180 Library/` | Vendored + patched PN5180 driver (see `lib/README-patch.md`) |
 
