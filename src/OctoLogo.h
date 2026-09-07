@@ -1,7 +1,7 @@
 #pragma once
 #include <Arduino.h>
 
-// OctoScale logo, converted from assets/octoscale_logo.jpeg to RGB565.
+// OctoScale logo, converted from assets/octoscale_logo.png to RGB565.
 // Regenerate: resize to LOGO_W x LOGO_H, RGB565-pack each pixel (see git history/session notes).
 static const int LOGO_W = 180;
 static const int LOGO_H = 180;

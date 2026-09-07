@@ -9,7 +9,7 @@ static const char INDEX_HTML[] PROGMEM =
     "<meta charset='UTF-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1,user-scalable=no'/>"
     "<title>OctoScale</title>"
-    // Favicon: the OctoScale octopus head, cropped square from assets/octoscale_logo.jpeg
+    // Favicon: the OctoScale octopus head, cropped square from assets/octoscale_logo.png
     // and recolored to a transparent background (same near-white threshold approach as
     // display.h's displayLogoThemed, applied offline during generation). Inlined as a
     // base64 data: URI (1.6 KB) rather than a separate file/endpoint -- this project has
@@ -32,6 +32,92 @@ static const char INDEX_HTML[] PROGMEM =
     ":root[data-theme='dark']{--bg:#000000;--surface:#161616;--surface2:#1f1f1f;"
     "--line:#393839;--ink:#e6e2e6;--muted:#acaeac;--accent:#ffa500;"
     "--accent-ink:#2a1800;--ok:#20ca41;--warn:#c56100;--bad:#ee1c20}"
+    // --- OctoPrint skin ------------------------------------------------------
+    // Second theme ("OctoPrint"): makes the web UI look like OctoPrint's own
+    // Bootstrap-2 interface instead of the OctoScale/TFT palette. Selected via
+    // data-skin='octoprint' on <html>; the display is unaffected (it keeps its own
+    // dark/light theme in NVS, see menu.h menuApplyTheme).
+    // Matched against a real OctoPrint 1.11 screenshot rather than "generic
+    // Bootstrap": the panel heads there are NOT grey bars -- they are white with a
+    // blue link-coloured heading and a hairline underneath; the blue is Bootstrap's
+    // link blue #337ab7 (not a button blue); buttons carry the classic
+    // #f5f5f5->#e6e6e6 vertical gradient with a #ccc border; and the whole UI runs
+    // at a smaller type size with tighter rows than the OctoScale skin.
+    ":root[data-skin='octoprint']{--bg:#ffffff;--surface:#ffffff;--surface2:#f5f5f5;"
+    "--line:#e5e5e5;--ink:#333333;--muted:#888888;--accent:#337ab7;--accent-ink:#ffffff;"
+    "--ok:#5cb85c;--warn:#f0ad4e;--bad:#d9534f;"
+    "--op-btn-top:#f5f5f5;--op-btn-bot:#e6e6e6;--op-btn-line:#cccccc}"
+    "@media(prefers-color-scheme:dark){:root[data-skin='octoprint']:not([data-theme='light']){"
+    "--bg:#1d2124;--surface:#25292d;--surface2:#2d3237;--line:#3a4046;"
+    "--ink:#e2e5e8;--muted:#9198a0;--accent:#5aa9e0;--accent-ink:#ffffff;"
+    "--ok:#5cb85c;--warn:#f0ad4e;--bad:#e05c58;"
+    "--op-btn-top:#31363b;--op-btn-bot:#282c31;--op-btn-line:#454b52}}"
+    ":root[data-skin='octoprint'][data-theme='dark']{--bg:#1d2124;--surface:#25292d;"
+    "--surface2:#2d3237;--line:#3a4046;--ink:#e2e5e8;--muted:#9198a0;--accent:#5aa9e0;"
+    "--accent-ink:#ffffff;--ok:#5cb85c;--warn:#f0ad4e;--bad:#e05c58;"
+    "--op-btn-top:#31363b;--op-btn-bot:#282c31;--op-btn-line:#454b52}"
+    ":root[data-skin='octoprint'] body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"
+    "font-size:13px;line-height:1.42857}"
+    // Panel: white on white, separated only by a hairline box (OctoPrint's sidebar
+    // accordion panels and content boxes both read this way), no rounded pills.
+    ":root[data-skin='octoprint'] .card{border-radius:4px;padding:0 14px 14px;"
+    "background:var(--surface)}"
+    // Head: blue link-coloured title on the panel's own background + hairline rule.
+    // Negative side margins pull it out to the panel edge so the rule spans the full
+    // width, while every other child keeps the card's normal 14px inset.
+    ":root[data-skin='octoprint'] .card h2{margin:0 -14px 10px;padding:10px 14px 8px;"
+    "background:none;border-bottom:1px solid var(--line);color:var(--accent);"
+    "text-transform:none;letter-spacing:0;font-size:15px;font-weight:400}"
+    ":root[data-skin='octoprint'] .card h2 .hint{font-size:12px;color:var(--muted)}"
+    // Buttons: Bootstrap 2/3 default -- vertical grey gradient, #ccc border, 4px.
+    // :not(.themebtn) matters: the header's light/dark button is a fixed 30x28 icon
+    // box, and this rule's padding/font-size would otherwise squash it (the skin
+    // selector outranks .themebtn, so it wins on every property it names).
+    ":root[data-skin='octoprint'] button:not(.themebtn){border-radius:4px;font-weight:400;"
+    "font-size:13px;padding:6px 12px;border:1px solid var(--op-btn-line);color:var(--ink);"
+    "background:linear-gradient(to bottom,var(--op-btn-top),var(--op-btn-bot))}"
+    ":root[data-skin='octoprint'] button:not(.themebtn):hover{border-color:var(--op-btn-line);"
+    "background:var(--op-btn-bot)}"
+    // The theme button keeps its own geometry, but takes the skin's border/gradient
+    // so it still reads as part of the OctoPrint chrome.
+    ":root[data-skin='octoprint'] .themebtn{border-radius:4px;border-color:var(--op-btn-line);"
+    "background:linear-gradient(to bottom,var(--op-btn-top),var(--op-btn-bot))}"
+    ":root[data-skin='octoprint'] .skinsel{border-radius:4px;border-color:var(--op-btn-line)}"
+    ":root[data-skin='octoprint'] button.primary{border-color:#2e6da4;"
+    "background:linear-gradient(to bottom,#337ab7,#2e6da4);color:#fff}"
+    ":root[data-skin='octoprint'] button.primary:hover{background:#2e6da4;filter:none}"
+    ":root[data-skin='octoprint'] button.danger{color:var(--bad);border-color:var(--op-btn-line)}"
+    ":root[data-skin='octoprint'] input[type=text],:root[data-skin='octoprint'] input[type=number],"
+    ":root[data-skin='octoprint'] input[type=password],:root[data-skin='octoprint'] input[type=url],"
+    ":root[data-skin='octoprint'] select{border-radius:4px;padding:6px 10px;font-size:13px;"
+    "background:var(--surface);border-color:var(--op-btn-line);"
+    "box-shadow:inset 0 1px 1px rgba(0,0,0,.075)}"
+    // Tab strip: Bootstrap nav-tabs -- a full-width bottom rule, the active tab
+    // "lifted out" of it with a box border on three sides.
+    ":root[data-skin='octoprint'] nav{border-bottom:1px solid var(--line);gap:0}"
+    ":root[data-skin='octoprint'] nav button{background:none;border:1px solid transparent;"
+    "border-radius:4px 4px 0 0;margin-bottom:-1px;padding:9px 14px;font-weight:400;"
+    "color:var(--accent)}"
+    ":root[data-skin='octoprint'] nav button:hover{background:var(--surface2);"
+    "border-color:var(--line) var(--line) var(--line)}"
+    ":root[data-skin='octoprint'] nav button[aria-selected='true']{color:var(--ink);"
+    "background:var(--surface);border-color:var(--line) var(--line) var(--surface)}"
+    ":root[data-skin='octoprint'] header{border-bottom:0}"
+    // Status chips: OctoPrint uses square-ish labels, not rounded pills.
+    ":root[data-skin='octoprint'] .chip{border-radius:3px;background:var(--surface2)}"
+    // Callout = Bootstrap alert-info: flat tinted box, no left rail. The .msg.ok /
+    // .warn / .bad modifiers keep their own left-rail colour (they are set on the
+    // border-left-color, which stays meaningful at 1px) so severity still reads.
+    // Only the neutral border sides are set here, never the border-color shorthand:
+    // .msg.ok/.warn/.bad colour the LEFT border and have lower specificity than this
+    // skin selector, so a shorthand would silently kill the severity rail.
+    ":root[data-skin='octoprint'] .msg{border-radius:4px;background:var(--surface2);"
+    "border-top-color:var(--line);border-right-color:var(--line);"
+    "border-bottom-color:var(--line)}"
+    ":root[data-skin='octoprint'] .row{padding:5px 0;font-size:13px}"
+    ":root[data-skin='octoprint'] .big{font-weight:300}"
+    ":root[data-skin='octoprint'] .pcard,:root[data-skin='octoprint'] .spoolcard{border-radius:4px}"
+    ":root[data-skin='octoprint'] .bar{border-radius:4px}"
     "*{box-sizing:border-box}"
     "body{margin:0;background:var(--bg);color:var(--ink);"
     "font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;-webkit-font-smoothing:antialiased}"
@@ -43,9 +129,27 @@ static const char INDEX_HTML[] PROGMEM =
     ".brand .bd{width:10px;height:10px;border-radius:50%;background:var(--accent)}"
     ".brand h1{font-size:17px;margin:0;font-weight:650}"
     ".brand .ver{font-size:12px;color:var(--muted);margin-left:auto}"
+    // Header controls (skin dropdown + light/dark button) share one box model so they
+    // line up on a common baseline: identical height/border/radius, centred content,
+    // and no line-height games (a <select> and a <button> resolve intrinsic height
+    // differently, which is what made them sit a pixel or two apart before).
     ".themebtn{appearance:none;background:var(--surface2);border:1px solid var(--line);"
-    "color:var(--muted);cursor:pointer;border-radius:7px;padding:0;font:inherit;font-size:15px;"
-    "margin-left:8px;width:30px;height:26px;line-height:24px;text-align:center;flex:0 0 auto}"
+    "color:var(--muted);cursor:pointer;border-radius:7px;padding:0;font:inherit;"
+    "width:30px;height:28px;flex:0 0 auto;display:inline-flex;align-items:center;"
+    "justify-content:center;margin:0}"
+    ".themebtn svg{width:15px;height:15px;display:block}"
+    // Skin dropdown in the header: the global select rule is width:100% (form
+    // fields), which would blow the header apart -- override to auto here.
+    ".skinsel{width:auto!important;flex:0 0 auto;margin:0 6px 0 auto!important;"
+    "padding:0 24px 0 8px!important;font-size:12px;height:28px;line-height:26px;"
+    "border-radius:7px;color:var(--muted);background:var(--surface2);"
+    "appearance:none;-webkit-appearance:none;"
+    // Chevron drawn as a background image so the control's height isn't at the mercy
+    // of the native dropdown arrow's metrics (that was the misalignment).
+    "background-image:url(\"data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' "
+    "viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888' "
+    "stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E\");"
+    "background-repeat:no-repeat;background-position:right 8px center;background-size:9px 6px}"
     ".status{display:flex;gap:7px;flex-wrap:wrap;padding:0 2px 9px}"
     ".chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 9px;"
     "border-radius:999px;background:var(--surface2);border:1px solid var(--line);color:var(--muted)}"
@@ -64,11 +168,28 @@ static const char INDEX_HTML[] PROGMEM =
     ".panel{display:none}.panel.active{display:block}"
     ".grid{display:grid;gap:12px}"
     "@media(min-width:600px){.grid.two{grid-template-columns:1fr 1fr}}"
+    // System tab layout. Two equal columns; the System card spans rows 2-3 in the
+    // right column so the pair below it (Status LED + WiFi, both short) fills the
+    // same height on the left. Source order is Display, Buzzer, LED, System, WiFi,
+    // Backup, Firmware -- auto-placement puts them right once System is told to span,
+    // with grid-auto-flow:dense so WiFi drops under the LED card instead of leaving a
+    // hole beside the spanning card. Single column below 600px, where the row pairing
+    // is meaningless anyway.
+    "@media(min-width:600px){.grid.sysgrid{grid-template-columns:1fr 1fr;"
+    "grid-auto-flow:row dense}"
+    ".grid.sysgrid .sysspan{grid-column:2;grid-row:span 2}}"
     ".card{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:15px}"
     ".card.span{grid-column:1/-1}"
     ".card h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);"
     "margin:0 0 11px;font-weight:650}"
     ".card h2 .hint{text-transform:none;letter-spacing:0;font-weight:500;float:right;color:var(--muted)}"
+    // Heading + tab icons (see the <symbol> sprite above <main>). Stroke-only and
+    // inheriting currentColor, so one set of paths serves both skins and both modes.
+    ".ci,.ti{fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;"
+    "stroke-linejoin:round;vertical-align:-2px;flex:0 0 auto}"
+    ".ci{width:13px;height:13px;margin-right:6px;opacity:.85}"
+    ".ti{width:14px;height:14px;margin-right:6px}"
+    "nav button{display:inline-flex;align-items:center}"
     ".big{font-size:38px;font-weight:600;line-height:1}.big small{font-size:16px;color:var(--muted);font-weight:500}"
     // rows (key/value)
     ".row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line);font-size:14px}"
@@ -118,6 +239,7 @@ static const char INDEX_HTML[] PROGMEM =
     ".switch{display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none}"
     ".switch input{width:auto;margin:0}"
     ".note{font-size:12px;color:var(--muted);margin-top:8px}"
+    ".sep{border:0;border-top:1px solid var(--line);margin:14px 0 0}"
     ".hidden{display:none}"
     // Spool info card (2x2 grid): left vendor/material + 'remaining', right color + weight.
     ".spoolcard{display:grid;grid-template-columns:1fr auto;gap:6px 14px;align-items:center;"
@@ -131,10 +253,30 @@ static const char INDEX_HTML[] PROGMEM =
     ".sc-bl{color:var(--muted);font-size:.85em;text-transform:uppercase;letter-spacing:.04em}"
     ".sc-br{justify-self:end;font-weight:700;font-size:1.35em;color:var(--accent);"
     "font-variant-numeric:tabular-nums}"
-    "</style></head><body>"
+    "</style>"
+    // Applied before the body paints, so a stored non-default skin/mode doesn't
+    // flash the OctoScale palette first. The bottom-of-page themeInit() repeats
+    // this and additionally syncs the <select> (which doesn't exist yet up here).
+    "<script>(function(){try{var s=localStorage.getItem('osSkin');"
+    "document.documentElement.setAttribute('data-skin',s||'octoscale');"
+    "var t=localStorage.getItem('osTheme');"
+    "if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>"
+    "</head><body>"
     "<header><div class='wrap' style='padding-bottom:0'>"
     "<div class='brand'><span class='bd'></span><h1>OctoScale</h1>"
-    "<button class='themebtn' onclick='toggleTheme()' title='Toggle theme'>&#9681;</button>"
+    // Skin selector + light/dark toggle. Both are browser-local (localStorage) --
+    // they style the web UI only, the TFT keeps its own theme setting (Device menu).
+    "<select class='skinsel' id='skinsel' onchange='setSkin(this.value)' title='UI theme'>"
+    "<option value='octoscale'>OctoScale</option>"
+    "<option value='octoprint'>OctoPrint</option></select>"
+    // Half-filled circle drawn as SVG rather than the &#9681; glyph: that character
+    // renders at wildly different sizes/baselines per font, which looked misplaced
+    // in the OctoPrint skin (Helvetica) compared to the OctoScale one.
+    "<button class='themebtn' onclick='toggleTheme()' title='Toggle light/dark' aria-label='Toggle light/dark'>"
+    "<svg viewBox='0 0 16 16' fill='none' stroke='currentColor' stroke-width='1.4'>"
+    "<circle cx='8' cy='8' r='6.3'/>"
+    "<path d='M8 1.7a6.3 6.3 0 0 1 0 12.6z' fill='currentColor' stroke='none'/>"
+    "</svg></button>"
     "</div>"   // version moved out of the header (already shown in the footer)
     // Device status bar (always visible) — order matches the display footer.
     "<div class='status'>"
@@ -144,13 +286,42 @@ static const char INDEX_HTML[] PROGMEM =
     "<span class='chip' id='cWifi'><span class='led'></span>WiFi <b>--</b></span></div>"
     // Tabs
     "<nav role='tablist'>"
-    "<button role='tab' aria-selected='true' onclick=\"tab(this,'betrieb')\">Operate</button>"
-    "<button role='tab' aria-selected='false' onclick=\"tab(this,'nfc')\">NFC</button>"
-    "<button role='tab' aria-selected='false' onclick=\"tab(this,'scale')\">Scale</button>"
-    "<button role='tab' aria-selected='false' onclick=\"tab(this,'setup')\">Setup</button>"
-    "<button role='tab' aria-selected='false' onclick=\"tab(this,'system')\">System</button>"
-    "<button role='tab' aria-selected='false' onclick=\"tab(this,'debug')\">Debug</button>"
+    "<button role='tab' aria-selected='true' onclick=\"tab(this,'betrieb')\"><svg class='ti'><use href='#i-weight'/></svg>Operate</button>"
+    "<button role='tab' aria-selected='false' onclick=\"tab(this,'nfc')\"><svg class='ti'><use href='#i-tag'/></svg>NFC</button>"
+    "<button role='tab' aria-selected='false' onclick=\"tab(this,'scale')\"><svg class='ti'><use href='#i-cal'/></svg>Scale</button>"
+    "<button role='tab' aria-selected='false' onclick=\"tab(this,'setup')\"><svg class='ti'><use href='#i-printer'/></svg>Setup</button>"
+    "<button role='tab' aria-selected='false' onclick=\"tab(this,'system')\"><svg class='ti'><use href='#i-cpu'/></svg>System</button>"
+    "<button role='tab' aria-selected='false' onclick=\"tab(this,'debug')\"><svg class='ti'><use href='#i-console'/></svg>Debug</button>"
     "</nav></div></header>"
+    // ---- Icon sprite -------------------------------------------------------
+    // One hidden <svg> holding every icon as a <symbol>; headings and tabs pull them
+    // in with <use href='#i-...'>. That keeps each path in the page exactly once
+    // (flash is the scarce resource here) and lets every icon inherit currentColor,
+    // so they follow both skins and both light/dark modes without extra rules.
+    // Stroke-only, 16x16 grid, matched to the line weight of the surrounding text.
+    "<svg style='display:none' aria-hidden='true'><defs>"
+    "<symbol id='i-weight' viewBox='0 0 16 16'><path d='M8 1.5a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2zM4.6 4.7h6.8l2.3 8.4a1 1 0 0 1-1 1.3H3.3a1 1 0 0 1-1-1.3z'/></symbol>"
+    "<symbol id='i-info' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6.4'/><path d='M8 7.2v4M8 4.9v.1'/></symbol>"
+    "<symbol id='i-tag' viewBox='0 0 16 16'><path d='M2 2h5l7 7-5 5-7-7z'/><circle cx='5' cy='5' r='1'/></symbol>"
+    "<symbol id='i-write' viewBox='0 0 16 16'><path d='M11.6 1.9l2.5 2.5L5.6 13 2 14l1-3.6z'/></symbol>"
+    "<symbol id='i-erase' viewBox='0 0 16 16'><path d='M2.5 4.2h11M5.6 4.2V2.6h4.8v1.6M4.1 4.2l.8 9.2h6.2l.8-9.2'/></symbol>"
+    "<symbol id='i-bug' viewBox='0 0 16 16'><rect x='5' y='5.4' width='6' height='8' rx='3'/><path d='M2.6 7.4h2.4M11 7.4h2.4M2.9 11.4h2.1M11 11.4h2.1M6 5.2L4.9 3.2M10 5.2l1.1-2'/></symbol>"
+    "<symbol id='i-chip' viewBox='0 0 16 16'><rect x='4.4' y='4.4' width='7.2' height='7.2' rx='1'/><path d='M6.6 4.4V2.2M9.4 4.4V2.2M6.6 13.8v-2.2M9.4 13.8v-2.2M4.4 6.6H2.2M4.4 9.4H2.2M13.8 6.6h-2.2M13.8 9.4h-2.2'/></symbol>"
+    "<symbol id='i-cal' viewBox='0 0 16 16'><path d='M8 1.8v12.4M4 4.6L8 1.8l4 2.8M2.2 8.4h11.6M4.6 8.4v3.2M11.4 8.4v3.2'/></symbol>"
+    "<symbol id='i-pulse' viewBox='0 0 16 16'><path d='M1.6 8h3l1.8-4.6L9.2 12l1.6-4h3.6'/></symbol>"
+    "<symbol id='i-printer' viewBox='0 0 16 16'><path d='M4.6 6V2.4h6.8V6M4.6 12.2H3a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v4.2a1 1 0 0 1-1 1h-1.6'/><rect x='4.6' y='10' width='6.8' height='3.8'/></symbol>"
+    "<symbol id='i-db' viewBox='0 0 16 16'><ellipse cx='8' cy='3.8' rx='5.4' ry='2.2'/><path d='M2.6 3.8v8.4c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2V3.8M2.6 8c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2'/></symbol>"
+    "<symbol id='i-clock' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6.4'/><path d='M8 4.4V8l2.4 1.6'/></symbol>"
+    "<symbol id='i-display' viewBox='0 0 16 16'><rect x='1.8' y='2.6' width='12.4' height='8.6' rx='1'/><path d='M5.6 13.8h4.8'/></symbol>"
+    "<symbol id='i-sound' viewBox='0 0 16 16'><path d='M7.6 2.8L4.4 5.6H2v4.8h2.4l3.2 2.8z'/><path d='M10.4 5.8a3 3 0 0 1 0 4.4M12.4 3.8a5.8 5.8 0 0 1 0 8.4'/></symbol>"
+    "<symbol id='i-cpu' viewBox='0 0 16 16'><rect x='2.2' y='2.2' width='11.6' height='11.6' rx='1.4'/><rect x='5.6' y='5.6' width='4.8' height='4.8' rx='.6'/></symbol>"
+    "<symbol id='i-wifi' viewBox='0 0 16 16'><path d='M1.6 5.6a9 9 0 0 1 12.8 0M4.1 8.4a5.4 5.4 0 0 1 7.8 0M6.5 11.1a2 2 0 0 1 3 0'/><circle cx='8' cy='13.4' r='.6' fill='currentColor'/></symbol>"
+    "<symbol id='i-update' viewBox='0 0 16 16'><path d='M8 2.2v7.6M5 6.8L8 9.8l3-3M2.6 12.2h10.8'/></symbol>"
+    "<symbol id='i-backup' viewBox='0 0 16 16'><path d='M2.4 4.6v6.8a1 1 0 0 0 1 1h9.2a1 1 0 0 0 1-1V4.6M2.4 4.6l1.4-2h8.4l1.4 2zM6.2 7.4h3.6'/></symbol>"
+    "<symbol id='i-preview' viewBox='0 0 16 16'><path d='M1.4 8S3.8 3.6 8 3.6 14.6 8 14.6 8 12.2 12.4 8 12.4 1.4 8 1.4 8z'/><circle cx='8' cy='8' r='2'/></symbol>"
+    "<symbol id='i-diag' viewBox='0 0 16 16'><path d='M9.6 2.2a3.4 3.4 0 0 0 4.2 4.2l-7 7a2 2 0 0 1-2.8-2.8z'/></symbol>"
+    "<symbol id='i-console' viewBox='0 0 16 16'><rect x='1.8' y='2.8' width='12.4' height='10.4' rx='1'/><path d='M4.6 6.4l2 1.8-2 1.8M8.4 10.4h3'/></symbol>"
+    "</defs></svg>"
     "<main class='wrap'>"
 
     // ================= OPERATE =================
@@ -164,11 +335,11 @@ static const char INDEX_HTML[] PROGMEM =
     "<button id='fcancel' class='ghost' style='display:none' onclick='fcancel()'>Cancel</button>"
     "</div>"
     // Weight
-    "<div class='card'><h2>Weight</h2>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-weight'/></svg>Weight</h2>"
     "<div class='big mono'><span id='w'>--</span><small> g</small></div>"
     "<form onsubmit=\"fetch('/tare');return false\"><button type='submit' class='ghost'>Tare</button></form></div>"
     // Short status / hint
-    "<div class='card'><h2>Hint</h2>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-info'/></svg>Hint</h2>"
     "<div class='msg'>Place a spool with an NFC tag &ndash; the load flow appears here automatically.</div></div>"
     "</div></section>"
 
@@ -180,16 +351,16 @@ static const char INDEX_HTML[] PROGMEM =
     // with debug alongside them.
     "<section id='nfc' class='panel'><div class='grid two'>"
     "<div class='grid' style='gap:12px;align-content:start'>"
-    "<div class='card'><h2>Tag on reader</h2>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-tag'/></svg>Tag on reader</h2>"
     "<div class='row'><span class='k'>UID</span><span class='v mono' id='uid'>--</span></div>"
     "<div class='row'><span class='k'>Data (page 4)</span><span class='v mono' id='tag'>--</span></div></div>"
-    "<div class='card'><h2>Write ID to tag</h2>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-write'/></svg>Write ID to tag</h2>"
     "<form onsubmit=\"nfcwid();return false\">"
     "<label class='field'>Spool database ID</label>"
     "<input type='number' id='nid' min='0' placeholder='Spool DB ID'>"
     "<button type='submit' class='primary'>Write to tag</button></form>"
     "<p class='note'>NFC-V (ISO15693), NFC-A/NTAG, and Mifare Classic (factory key only).</p></div>"
-    "<div class='card'><h2>Erase tag</h2>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-erase'/></svg>Erase tag</h2>"
     "<div class='msg'>Wipes the spool ID and all Extended data (material, color, "
     "weights, ...) from the tag on the reader. Cannot be undone.</div>"
     "<button onclick='nfcerase()' class='danger'>Erase tag</button>"
@@ -198,7 +369,7 @@ static const char INDEX_HTML[] PROGMEM =
     "limit, not reversible by any writer) &ndash; the tag still reads as blank/empty "
     "either way.</p></div>"
     "</div>"
-    "<div class='card'><h2>NFC debug <span class='hint'>read-only, show tag type</span></h2>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-bug'/></svg>NFC debug <span class='hint'>read-only, show tag type</span></h2>"
     "<label class='switch'><input type='checkbox' id='ndbg' onchange='ndbgset(this)'>"
     "<span>Debug mode active</span></label>"
     "<div class='msg' id='ndbox' style='display:none;margin-top:12px'>"
@@ -215,7 +386,7 @@ static const char INDEX_HTML[] PROGMEM =
     "<div class='row' id='ndicrow' style='display:none'><span class='k'>IC reference"
     "<span class='hint'> (raw, not decoded to a chip name)</span></span>"
     "<span class='v mono' id='ndicref'>--</span></div>"
-    "<div class='row' id='ndccrow' style='display:none'><span class='k'>NDEF bit</span>"
+    "<div class='row' id='ndccrow' style='display:none'><span class='k' id='ndcck'>NDEF bit</span>"
     "<span class='v' id='ndcc'>--</span></div>"
     "<div class='row' id='ndfrow' style='display:none'><span class='k'>Format</span>"
     "<span class='v' id='ndfmt'>--</span></div>"
@@ -254,7 +425,9 @@ static const char INDEX_HTML[] PROGMEM =
     // Unknown-tag fallback: no OctoScale/OpenSpool/OpenPrintTag data recognized, but a
     // tag IS present. Offers a raw sector/block dump instead of just showing blanks --
     // useful for identifying a foreign/vendor-written tag (see menu.h's matching "See
-    // dump in web UI" TFT hint). Mifare Classic only for now (see /nfcdump).
+    // dump in web UI" TFT hint). Works on Mifare Classic, NTAG213/215/216 and NFC-V --
+    // the button is not gated on tag type because /nfcdump dispatches on the carrier
+    // itself and the table below renders whatever rows come back.
     "<div id='ndunk' style='display:none;margin-top:10px;padding-top:10px;"
     "border-top:1px solid var(--line)'>"
     "<div class='msg'>No known OctoScale/OpenSpool/OpenPrintTag data found on this tag. "
@@ -271,7 +444,7 @@ static const char INDEX_HTML[] PROGMEM =
     // Chip-level health/diagnostic status (PN5180 itself, not the tag on it) -- only
     // populated while NFC debug is on (see /nfcprobe's "chip" object); double-width,
     // below the other NFC cards.
-    "<div class='card span' id='ndchipcard' style='display:none'><h2>PN5180 chip status "
+    "<div class='card span' id='ndchipcard' style='display:none'><h2><svg class='ci'><use href='#i-chip'/></svg>PN5180 chip status "
     "<span class='hint'>reader hardware, not the tag</span></h2>"
     "<div class='grid two' style='gap:4px 24px'>"
     "<div class='row'><span class='k'>Die ID</span><span class='v mono' id='ndcdie' style='font-size:11px'>--</span></div>"
@@ -288,7 +461,7 @@ static const char INDEX_HTML[] PROGMEM =
 
     // ================= SCALE =================
     "<section id='scale' class='panel'><div class='grid two'>"
-    "<div class='card'><h2>Scale calibration</h2>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-cal'/></svg>Scale calibration</h2>"
     "<div class='row'><span class='k'>Current factor</span><span class='v mono' id='f'>--</span></div>"
     "<form onsubmit=\"fetch('/tare');return false\" style='margin:10px 0'>"
     "<button type='submit' class='ghost'>Tare (do this first, scale empty)</button></form>"
@@ -324,7 +497,7 @@ static const char INDEX_HTML[] PROGMEM =
     // HX711 diagnostics -- the load cell amplifier has no status registers, so this is
     // the raw ADC reading + a computed noise estimate, not chip-reported health (unlike
     // the PN5180 chip status card in the NFC tab).
-    "<div class='card'><h2>HX711 diagnostics <span class='hint'>raw ADC, not chip-reported</span></h2>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-pulse'/></svg>HX711 diagnostics <span class='hint'>raw ADC, not chip-reported</span></h2>"
     "<div class='row'><span class='k'>HX711 responding</span><span class='v' id='scready'>--</span></div>"
     "<div class='row'><span class='k'>Last read</span><span class='v mono' id='scage'>--</span></div>"
     "<div class='row'><span class='k'>Raw ADC value</span><span class='v mono' id='scraw'>--</span></div>"
@@ -336,7 +509,7 @@ static const char INDEX_HTML[] PROGMEM =
 
     // ================= SETUP =================
     "<section id='setup' class='panel'><div class='grid two'>"
-    "<div class='card span'><h2>OctoPrint printers</h2>"
+    "<div class='card span'><h2><svg class='ci'><use href='#i-printer'/></svg>OctoPrint printers</h2>"
     "<div id='octobox'>Loading...</div>"
     "<form onsubmit=\"octoadd();return false\">"
     "<label class='field'>Add a printer</label>"
@@ -347,7 +520,7 @@ static const char INDEX_HTML[] PROGMEM =
     "<input type='text' id='okey' placeholder='API key'></div>"
     "<button type='submit' class='primary'>Add printer</button></form>"
     "<button onclick='dbrefresh(event)' class='ghost'>Refresh DB info</button></div>"
-    "<div class='card'><h2>Spool database</h2>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-db'/></svg>Spool database</h2>"
     "<div class='msg'>Spools come from SpoolManagerExtended. Pick the preferred "
     "OctoPrint instance as the DB source. If it is offline, another instance with a "
     "<b>shared external DB</b> (&#x1F5C4;&#xFE0F;) takes over. Local SQLite "
@@ -359,7 +532,7 @@ static const char INDEX_HTML[] PROGMEM =
     "<input type='number' id='dbtid' min='0' placeholder='Spool ID (default: tag on reader)'>"
     "<button type='submit' class='ghost'>Test</button></form>"
     "<div id='mtestmsg' class='note' style='text-align:center;min-height:1.1em'></div></div>"
-    "<div class='card'><h2>Selection timeout</h2>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-clock'/></svg>Selection timeout</h2>"
     "<div class='msg'>How long the selection stays open after the <b>tag is removed</b> "
     "before it resets. <b>0 = never</b>.</div>"
     "<form onsubmit=\"tmset(event);return false\">"
@@ -370,10 +543,12 @@ static const char INDEX_HTML[] PROGMEM =
     "</div></section>"
 
     // ================= SYSTEM =================
-    "<section id='system' class='panel'><div class='grid two'>"
-    "<div class='card'><h2>Display</h2>"
-    "<div class='msg'>The screen runs at the active brightness while in use, and drops to "
-    "the idle brightness after the timeout with no activity (encoder, weight, NFC).</div>"
+    "<section id='system' class='panel'><div class='grid sysgrid'>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-display'/></svg>Display</h2>"
+    "<div class='msg'>The screen runs at the active brightness while in use, then steps "
+    "down as it sits idle: dimmed after the idle timeout, the bouncing logo after the "
+    "screensaver timeout, and fully off after the display-off timeout. Activity "
+    "(encoder, weight, NFC, web UI) returns it to full brightness from any stage.</div>"
     "<label class='field'>Active brightness: <span id='blval'>255</span> / 255</label>"
     "<input type='range' id='blv' min='10' max='255' value='255' oninput='blset(this.value)' onchange='blsave()' style='width:100%'>"
     "<label class='field'>Idle brightness: <span id='bldval'>40</span> / 255</label>"
@@ -384,9 +559,16 @@ static const char INDEX_HTML[] PROGMEM =
     "Logo screensaver</label>"
     "<label class='field'>Screensaver after (seconds)</label>"
     "<input type='number' id='sst' min='5' max='3600' value='60' onchange='blsave()'>"
+    // Third idle stage: panel fully off (backlight 0 + ST7789 asleep). Off by default
+    // -- a completely dark screen is easy to mistake for a hung device.
+    "<label class='switch' style='margin-top:10px'><input type='checkbox' id='offe' onchange='blsave()'> "
+    "Turn display off</label>"
+    "<label class='field'>Display off after (seconds)</label>"
+    "<input type='number' id='offt' min='10' max='3600' value='300' onchange='blsave()'>"
     "<div id='blmsg' class='note' style='text-align:center;min-height:1.1em'></div></div>"
     // ---- Buzzer ----
-    "<div class='card'><h2>Buzzer</h2>"
+    // ---- Status LED ----
+    "<div class='card'><h2><svg class='ci'><use href='#i-sound'/></svg>Buzzer</h2>"
     "<div class='msg'>Signal tones on NFC read, spool load and errors. Master on/off is also "
     "in the device menu on the display. Volume and frequency apply to a passive buzzer only "
     "(an active buzzer has a fixed built-in tone).</div>"
@@ -401,20 +583,25 @@ static const char INDEX_HTML[] PROGMEM =
     "<input type='number' id='bzf' min='100' max='8000' value='2700' onchange='bzsave()'>"
     "<button onclick='bztest(event)' class='ghost'>Test tone</button>"
     "<div id='bzmsg' class='note' style='text-align:center;min-height:1.1em'></div></div>"
-    "<div class='card'><h2>System</h2><div id='sysbox'>Loading...</div></div>"
-    "<div class='card'><h2>WiFi</h2><div id='wifibox'>Loading...</div>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-diag'/></svg>Status LED</h2>"
+    "<div class='msg'>Overall brightness of the WS2812 status LED. Colours and blink "
+    "patterns are unaffected &ndash; every status colour is scaled by the same factor, "
+    "so red stays red and a flash still stands out against the idle glow.</div>"
+    "<label class='field'>Brightness: <span id='ldval'>255</span> / 255</label>"
+    "<input type='range' id='ldv' min='0' max='255' value='255' oninput='ldset(this.value)' onchange='ldsave()' style='width:100%'>"
+    "<label class='switch' style='margin-top:10px'><input type='checkbox' id='ldob' onchange='ldsave()'> "
+    "Onboard LED on the ESP32</label>"
+    "<div id='ldmsg' class='note' style='text-align:center;min-height:1.1em'></div></div>"
+    // ---- Buzzer ----
+    "<div class='card sysspan'><h2><svg class='ci'><use href='#i-cpu'/></svg>System</h2><div id='sysbox'>Loading...</div></div>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-wifi'/></svg>WiFi</h2><div id='wifibox'>Loading...</div>"
+    // The GPIO 2 LED is a plain on/off indicator for "WiFi connected", so its switch
+    // lives here rather than in the Status LED card (which is about the RGB strands
+    // and their brightness -- neither applies to this one).
+    "<label class='switch' style='margin-top:12px'><input type='checkbox' id='ldp2' onchange='ldp2save()'> "
+    "Connection LED on the board</label>"
     "<button onclick='wifiportal(event)' class='ghost'>Reconfigure WiFi</button></div>"
-    "<div class='card'><h2>Firmware update</h2>"
-    "<form method='POST' action='/update' enctype='multipart/form-data'>"
-    "<label class='field'>From file</label>"
-    "<input type='file' name='firmware' accept='.bin,application/octet-stream'>"
-    "<button type='submit' class='primary'>Update (file)</button></form>"
-    "<form onsubmit=\"fwurl(event);return false\">"
-    "<label class='field'>From URL (ESP downloads the .bin)</label>"
-    "<input type='url' id='fwu' placeholder='http://.../firmware.bin'>"
-    "<button type='submit' class='ghost'>Update from URL</button></form>"
-    "<div id='fwmsg' class='note' style='text-align:center;min-height:1.1em'></div></div>"
-    "<div class='card'><h2>Backup &amp; restore</h2>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-backup'/></svg>Backup &amp; restore</h2>"
     "<div class='msg'>Saves the config. With a <b>password</b> the API keys are "
     "AES-256 encrypted &#x1F510; &ndash; without a password they are <b>omitted</b>. "
     "Restoring needs the same password.</div>"
@@ -425,12 +612,25 @@ static const char INDEX_HTML[] PROGMEM =
     "<input type='file' id='bkfile' accept='.json,application/json'>"
     "<button onclick='bkimport(event)' class='danger'>&#x26A0;&#xFE0F; Restore (overwrites)</button>"
     "<div id='bkmsg' class='note' style='text-align:center;min-height:1.1em'></div></div>"
+    "<div class='card'><h2><svg class='ci'><use href='#i-update'/></svg>Firmware update</h2>"
+    "<div class='msg'>Settings, calibration and paired printers live in NVS and are "
+    "kept. The device locks its display and reboots when the update finishes "
+    "&ndash; don't cut the power while it runs.</div>"
+    "<form method='POST' action='/update' enctype='multipart/form-data'>"
+    "<label class='field'>From file</label>"
+    "<input type='file' name='firmware' accept='.bin,application/octet-stream'>"
+    "<button type='submit' class='primary'>Update (file)</button></form>"
+    "<form onsubmit=\"fwurl(event);return false\">"
+    "<label class='field'>From URL (ESP downloads the .bin)</label>"
+    "<input type='url' id='fwu' placeholder='http://.../firmware.bin'>"
+    "<button type='submit' class='ghost'>Update from URL</button></form>"
+    "<div id='fwmsg' class='note' style='text-align:center;min-height:1.1em'></div></div>"
     "</div></section>"
 
     // ================= DEBUG =================
     "<section id='debug' class='panel'><div class='grid two'>"
     // ---- TFT screen preview -- double-width, first card in this tab ----
-    "<div class='card span'><h2>TFT screen preview <span class='hint'>read-only, for checking layouts</span></h2>"
+    "<div class='card span'><h2><svg class='ci'><use href='#i-preview'/></svg>TFT screen preview <span class='hint'>read-only, for checking layouts</span></h2>"
     "<div class='msg'>Steps through every screen the display can show, using demo data "
     "&ndash; no tag placed, no printer/DB call, nothing written. The status LED and "
     "buzzer fire in sync with whatever the real screen would trigger (buzzer stays "
@@ -454,7 +654,45 @@ static const char INDEX_HTML[] PROGMEM =
     "border:1px solid var(--line);vertical-align:middle;margin-right:6px'></span>"
     "<span id='mpvbuzz' class='mono'>--</span></span></div>"
     "</div>"
-    "<div class='card span'><h2>Debug console</h2>"
+    // ---- Diagnostics: same test points as the device's hidden test menu (System
+    // info screen, hold PUSH 3s) -- for checking a freshly assembled unit without
+    // needing physical access. Button/knob tests are physical-only, not shown here.
+    "<div class='card span'><h2><svg class='ci'><use href='#i-diag'/></svg>Diagnostics <span class='hint'>hardware test points</span></h2>"
+    "<div class='msg'>Live status and manual triggers for the same test points on the "
+    "device's hidden test menu (System info screen: hold PUSH 3s). Button/knob tests need "
+    "physical access and aren't shown here.</div>"
+    "<div class='row'><span class='k'>NFC reader</span><span class='v' id='dgnfcready'>--</span></div>"
+    "<div class='row'><span class='k'>Tag present</span><span class='v' id='dgnfcpresent'>--</span></div>"
+    "<div class='row'><span class='k'>UID</span><span class='v mono' id='dgnfcuid'>--</span></div>"
+    "<div class='row'><span class='k'>Scale</span><span class='v' id='dgscaleready'>--</span></div>"
+    "<div class='row'><span class='k'>Weight</span><span class='v mono' id='dgweight'>--</span></div>"
+    "<label class='field' style='margin-top:10px'>LED test color</label>"
+    "<div class='row'>"
+    "<button onclick='dgled(0)' class='ghost'>Red</button> "
+    "<button onclick='dgled(1)' class='ghost'>Green</button> "
+    "<button onclick='dgled(2)' class='ghost'>Blue</button> "
+    "<button onclick='dgled(3)' class='ghost'>White</button> "
+    "<button onclick='dgled(4)' class='ghost'>Off</button> "
+    "<button onclick='dgled(-1)' class='ghost'>Release</button>"
+    "</div>"
+    "<button onclick='bztest(event)' class='ghost' style='margin-top:10px'>Buzzer test tone</button>"
+    // Divider: the buzzer button and the screen-pattern buttons are unrelated test
+    // points and ran together visually without a separator (the LED/screen groups
+    // above and below are only separated by their 'field' labels).
+    "<hr class='sep'>"
+    "<label class='field' style='margin-top:0'>Screen test pattern</label>"
+    "<div class='row'>"
+    "<button onclick='dgtft(0)' class='ghost'>Red</button> "
+    "<button onclick='dgtft(1)' class='ghost'>Green</button> "
+    "<button onclick='dgtft(2)' class='ghost'>Blue</button> "
+    "<button onclick='dgtft(3)' class='ghost'>White</button> "
+    "<button onclick='dgtft(4)' class='ghost'>Black</button> "
+    "<button onclick='dgtft(10)' class='ghost'>Font</button> "
+    "<button onclick='dgtft(20)' class='ghost'>Grayscale</button> "
+    "<button onclick='dgtft(-1)' class='ghost'>Release</button>"
+    "</div>"
+    "</div>"
+    "<div class='card span'><h2><svg class='ci'><use href='#i-console'/></svg>Debug console</h2>"
     "<div class='msg'>Live firmware trace &ndash; NFC tag reads/writes, OctoPrint and "
     "SpoolManagerExtended requests, load-flow steps, menu navigation and scale readings. Kept "
     "in an in-RAM ring buffer of the last 400 lines; older lines are dropped. Off by "
@@ -476,9 +714,20 @@ static const char INDEX_HTML[] PROGMEM =
     "b.setAttribute('aria-selected',b===btn);});"
     "document.querySelectorAll('.panel').forEach(function(p){p.classList.toggle('active',p.id===id);});}"
     "function gotoTab(id){var b=document.querySelector(\"nav button[onclick*=\\\"'\"+id+\"'\\\"]\");if(b)tab(b,id);}"
+    // Theme = skin (OctoScale/OctoPrint palette+shapes) x mode (light/dark). Both
+    // persist in localStorage per browser; without a stored mode the page follows
+    // prefers-color-scheme (no data-theme attribute set at all). Wrapped in try/catch
+    // because localStorage throws in private windows / when site data is blocked.
+    "function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}"
+    "function lsSet(k,v){try{localStorage.setItem(k,v);}catch(e){}}"
+    "function setSkin(s){document.documentElement.setAttribute('data-skin',s);"
+    "lsSet('osSkin',s);var el=document.getElementById('skinsel');if(el)el.value=s;}"
     "function toggleTheme(){var r=document.documentElement,cur=r.getAttribute('data-theme');"
     "var dk=window.matchMedia('(prefers-color-scheme:dark)').matches;"
-    "r.setAttribute('data-theme',(cur==='dark'||(!cur&&dk))?'light':'dark');}"
+    "var next=(cur==='dark'||(!cur&&dk))?'light':'dark';"
+    "r.setAttribute('data-theme',next);lsSet('osTheme',next);}"
+    "function themeInit(){setSkin(lsGet('osSkin')||'octoscale');"
+    "var t=lsGet('osTheme');if(t)document.documentElement.setAttribute('data-theme',t);}"
     // busy(btn,promise): disables the button during the request, shows '...'.
     "function busy(btn,p){var b=btn&&btn.submitter?btn.submitter:(btn&&btn.target?btn.target:btn);"
     "if(!b||b.tagName!=='BUTTON')return p;var t=b.textContent;b.disabled=true;b.textContent='\\u2026';"
@@ -546,9 +795,15 @@ static const char INDEX_HTML[] PROGMEM =
     "if(!s.ok){msg.textContent=s.err||'dump failed';msg.style.color='var(--bad)';"
     "document.getElementById('ndumptbl').innerHTML='';return;}"
     "var authFail=(s.blocks||[]).filter(function(b){return!b.authOk;}).length;"
-    "msg.textContent=s.blocks.length+' blocks read'+(authFail?', '+authFail+' sector(s) not authenticated (non-default key)':'');"
+    // Unit-aware wording: 16-byte Mifare blocks vs. 4-byte NTAG pages / NFC-V blocks
+    // packed 4-per-row. unitCount is the exact figure; blocks.length would overcount
+    // by the last row's zero padding on the 4-byte carriers.
+    "var unitName=(s.tagType==='ntag')?'pages':'blocks';"
+    "var nUnits=(s.unitCount!=null)?s.unitCount:s.blocks.length;"
+    "msg.textContent=nUnits+' '+unitName+' read'+(s.ntagVariant?' ('+s.ntagVariant+')':'')+(authFail?', '+authFail+' sector(s) not authenticated (non-default key)':'');"
     "msg.style.color='var(--ok)';"
-    "var rows='<tr><th style=\\'text-align:left;padding:2px 8px\\'>Block</th>"
+    "var colName=(s.tagType==='ntag')?'Page':'Block';"
+    "var rows='<tr><th style=\\'text-align:left;padding:2px 8px\\'>'+colName+'</th>"
     "<th style=\\'text-align:left;padding:2px 8px\\'>Data (hex)</th>"
     "<th style=\\'text-align:left;padding:2px 8px\\'>ASCII</th></tr>';"
     "(s.blocks||[]).forEach(function(b){"
@@ -570,12 +825,18 @@ static const char INDEX_HTML[] PROGMEM =
     ".catch(e=>{alert('Request failed: '+e);document.getElementById('ndumpbtn').disabled=false;"
     "document.getElementById('ndumpbtn').textContent='Create dump';});}"
     // ---- NFC debug ----
+    // Both the debug box and the PN5180 chip card belong to debug mode, so one helper
+    // sets both -- ndbg()'s early return below happens BEFORE the chip card is
+    // otherwise touched, which used to leave it on screen after switching debug off.
+    "function ndbgvis(on){"
+    "document.getElementById('ndbox').style.display=on?'':'none';"
+    "document.getElementById('ndchipcard').style.display=on?'':'none';}"
     "function ndbgset(cb){fetch('/nfcdebug?on='+(cb.checked?1:0)).then(r=>r.json()).then(o=>{"
-    "document.getElementById('ndbox').style.display=o.debug?'':'none';});}"
+    "ndbgvis(o.debug);});}"
     "function ndbg(){fetch('/nfcdebug').then(r=>r.json()).then(o=>{"
     "document.getElementById('ndbg').checked=o.debug;"
-    "document.getElementById('ndbox').style.display=o.debug?'':'none';"
-    "if(!o.debug)return;"
+    "if(!o.debug){ndbgvis(false);return;}"
+    "document.getElementById('ndbox').style.display='';"
     "fetch('/nfcprobe').then(r=>r.json()).then(p=>{"
     "document.getElementById('ndtype').textContent=p.present?p.typeName:'no tag';"
     "document.getElementById('nduid').textContent=p.present&&p.uid?p.uid:'--';"
@@ -612,11 +873,25 @@ static const char INDEX_HTML[] PROGMEM =
     // NDEF/CC bit: only meaningful for NFC-A/NTAG + NFC-V (Mifare/no-tag -> ccState '').
     // 'ndef' = the tag's one-way OTP bit is set (permanent, survives an erase) -- shown
     // in the warn color as a heads-up, not an error. 'virgin' = never written (ok/green).
+    //
+    // The nfcvExtended case needs its own wording, and the reason is a real layout
+    // collision rather than a display quirk: on NFC-V the legacy databaseId anchor
+    // lives at block 0 (PN5180_ID_START_BLOCK) -- the very block an NDEF tag keeps its
+    // Capability Container in. The two formats are mutually exclusive there, so an
+    // Extended tag legitimately has NO CC: block 0 reads back as ASCII digits (e.g.
+    // 0x31 0x31 0x30 = "110"), which is neither 0x00 nor 0xE1/0xE2 -> ccState 'other'.
+    // Reporting that as red "Unknown/foreign content" was accurate about the bytes but
+    // actively misleading about the tag: it is our own payload, correctly written.
+    // NTAG never hits this -- its CC sits on page 3 and the id anchor starts at page 4.
     "var cc=p.ccState||'';"
     "document.getElementById('ndccrow').style.display=cc?'':'none';"
-    "if(cc){var e=document.getElementById('ndcc');"
-    "e.textContent=cc==='ndef'?'Set (NDEF, permanent)':cc==='virgin'?'Not set (virgin)':'Unknown/foreign content';"
-    "e.style.color=cc==='ndef'?'var(--warn)':cc==='virgin'?'var(--ok)':'var(--bad)';}"
+    "if(cc){var e=document.getElementById('ndcc'),k=document.getElementById('ndcck');"
+    "var extBlk0=(p.writeFormat==='nfcvExtended');"
+    "k.textContent=extBlk0?'Block 0':'NDEF bit';"
+    "e.textContent=extBlk0?'Not applicable (Extended stores the spool ID here)'"
+    ":cc==='ndef'?'Set (NDEF, permanent)':cc==='virgin'?'Not set (virgin)':'Unknown/foreign content';"
+    "e.style.color=extBlk0?'var(--muted)'"
+    ":cc==='ndef'?'var(--warn)':cc==='virgin'?'var(--ok)':'var(--bad)';}"
     // Format/capacity: only meaningful with a tag present.
     "document.getElementById('ndfrow').style.display=p.present?'':'none';"
     "document.getElementById('ndcaprow').style.display=p.present&&p.capacityBytes?'':'none';"
@@ -815,9 +1090,11 @@ static const char INDEX_HTML[] PROGMEM =
     "var now=Date.now();if(now-_blt<120)return;_blt=now;fetch('/backlight?level='+v);}"
     "function blsave(){var a=document.getElementById('blv').value,"
     "d=document.getElementById('bld').value,t=document.getElementById('blt').value,"
-    "se=document.getElementById('sse').checked?1:0,st=document.getElementById('sst').value;"
+    "se=document.getElementById('sse').checked?1:0,st=document.getElementById('sst').value,"
+    "oe=document.getElementById('offe').checked?1:0,ot=document.getElementById('offt').value;"
     "var m=document.getElementById('blmsg');"
-    "fetch('/display?active='+a+'&dim='+d+'&timeout='+t+'&ssEnabled='+se+'&ssTimeout='+st)"
+    "fetch('/display?active='+a+'&dim='+d+'&timeout='+t+'&ssEnabled='+se+'&ssTimeout='+st"
+    "+'&offEnabled='+oe+'&offTimeout='+ot)"
     ".then(r=>r.json()).then(function(){"
     "m.textContent='\\u2713 saved';m.style.color='var(--ok)';"
     "setTimeout(()=>m.textContent='',2000);});}"
@@ -826,7 +1103,28 @@ static const char INDEX_HTML[] PROGMEM =
     "document.getElementById('bld').value=o.dim;document.getElementById('bldval').textContent=o.dim;"
     "document.getElementById('blt').value=o.timeout;"
     "document.getElementById('sse').checked=!!o.ssEnabled;"
-    "document.getElementById('sst').value=o.ssTimeout;});}"
+    "document.getElementById('sst').value=o.ssTimeout;"
+    "document.getElementById('offe').checked=!!o.offEnabled;"
+    "document.getElementById('offt').value=o.offTimeout;});}"
+    // ---- Status LED brightness ----
+    // Same shape as the backlight slider: throttled live updates while dragging (each
+    // one also persists, which is fine -- NVS writes are wear-levelled and the throttle
+    // caps them), plus a confirmation on release.
+    "var _ldt=0;"
+    "function ldset(v){document.getElementById('ldval').textContent=v;"
+    "var now=Date.now();if(now-_ldt<120)return;_ldt=now;fetch('/led?level='+v);}"
+    "function ldsave(){var v=document.getElementById('ldv').value,"
+    "ob=document.getElementById('ldob').checked?1:0,m=document.getElementById('ldmsg');"
+    "fetch('/led?level='+v+'&onboard='+ob).then(r=>r.json()).then(function(){"
+    "m.textContent='\u2713 saved';m.style.color='var(--ok)';"
+    "setTimeout(()=>m.textContent='',2000);});}"
+    "function ldload(){fetch('/led').then(r=>r.json()).then(o=>{"
+    "document.getElementById('ldv').value=o.level;"
+    "document.getElementById('ldval').textContent=o.level;"
+    "document.getElementById('ldob').checked=!!o.onboard;"
+    "document.getElementById('ldp2').checked=!!o.pin2;});}"
+    // GPIO 2 connection LED (switch sits in the WiFi card, same /led endpoint).
+    "function ldp2save(){fetch('/led?pin2='+(document.getElementById('ldp2').checked?1:0));}"
     // ---- Buzzer ----
     "function bzsave(){var e=document.getElementById('bze').checked?1:0,"
     "m=document.getElementById('bzm').value,v=document.getElementById('bzv').value,"
@@ -870,6 +1168,23 @@ static const char INDEX_HTML[] PROGMEM =
     "function mpvset(cb){var on=cb.checked?1:0;"
     "fetch('/menupreview?on='+on).then(r=>r.json()).then(o=>{mpvApply(o);"
     "if(o.active){clearTimeout(mpvTimer);mpvpoll();}});}"
+    // ---- Diagnostics card ----
+    // Fire-and-forget: /testled and /testtft don't report a running "mode" (unlike
+    // the screen preview above), so these are plain one-shot triggers, no toggle state
+    // to reconcile client-side.
+    "function dgled(idx){fetch('/testled?idx='+idx);}"
+    "function dgtft(p){fetch('/testtft?pattern='+p);}"
+    "var dgTimer=null;"
+    "function dgpoll(){"
+    "fetch('/nfc5180').then(r=>r.json()).then(function(o){"
+    "document.getElementById('dgnfcready').textContent=o.ready?'ready':'not ready';"
+    "document.getElementById('dgnfcpresent').textContent=o.present?'yes':'no';"
+    "document.getElementById('dgnfcuid').textContent=o.present?o.uid:'--';});"
+    "fetch('/scaleinfo').then(r=>r.json()).then(function(o){"
+    "document.getElementById('dgscaleready').textContent=o.ready?'ready':'not ready';});"
+    "fetch('/weight').then(r=>r.text()).then(function(t){"
+    "document.getElementById('dgweight').textContent=t+' g';});"
+    "if(!document.hidden)dgTimer=setTimeout(dgpoll,1000);}"
     // Auto-cycle: a plain client-side setInterval calling the existing ?next=1 step
     // endpoint -- no new firmware endpoint needed, this just automates the same knob
     // action a person would do by hand.
@@ -1086,5 +1401,5 @@ static const char INDEX_HTML[] PROGMEM =
     "wpoll();upN();fpoll();wifiupd();sysupd();ndbg();scpoll();"
     // dbgpoll's setTimeout chain stops itself while hidden (see dbgpoll) -> restart it.
     "var cb=document.getElementById('dbge');if(cb&&cb.checked)dbgpoll();}});"
-    "upF();upN();fpoll();octol();dbload();wifiupd();sysupd();tmload();ndbg();blload();bzload();dbgload();mpvpoll();</script>"
+    "themeInit();upF();upN();fpoll();octol();dbload();wifiupd();sysupd();tmload();ndbg();blload();ldload();bzload();dbgload();mpvpoll();dgpoll();</script>"
     "</body></html>";

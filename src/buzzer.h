@@ -23,6 +23,10 @@ extern uint8_t  g_buzMode;        // 0 = active (on/off), 1 = passive (LEDC tone
 extern uint8_t  g_buzVol;         // volume 0..255 (passive only, duty cycle)
 extern uint16_t g_buzFreq;        // base pitch in Hz (passive only)
 extern Adafruit_NeoPixel pixel;   // onboard WS2812 status LED (main.cpp, declared before this include)
+// Sets BOTH status pixels (onboard + external) under the shared RMT lock. Defined in
+// main.cpp after this include, hence the forward declaration -- never touch `pixel`
+// directly from here, that would skip the external mirror and the lock.
+bool ledShow(uint32_t color);
 
 // Synced status LED: on (given color) exactly while a tone segment is sounding, off in
 // the gaps -> the LED visibly "beeps" along with the buzzer instead of a separate,
@@ -49,13 +53,12 @@ static uint32_t g_buzSegUntil = 0;   // end of the current phase (millis)
 static bool     g_buzInGap   = false;
 
 // Drives the WS2812 status LED in sync with the current tone phase (on/off), if this
-// sequence has a color set. Safe to call every phase change (setPixelColor+show is
-// cheap, one LED).
+// sequence has a color set. Safe to call every phase change (a show() pair is cheap at
+// one pixel per strand); a frame lost to the other core is simply skipped.
 static inline void buzzerLedSet(bool on) {
   if (!g_buzLedColor) return;
   g_buzLedOn = on;
-  pixel.setPixelColor(0, on ? g_buzLedColor : 0);
-  pixel.show();
+  ledShow(on ? g_buzLedColor : 0);
 }
 
 // Turn the tone on (mode-dependent). f only matters in passive mode.

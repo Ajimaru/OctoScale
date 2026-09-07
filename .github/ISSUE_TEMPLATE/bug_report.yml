@@ -1,0 +1,49 @@
+name: Bug report
+description: Something does not work as described
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Firmware version
+      description: From the footer of the web UI, e.g. "v0.0.1 · Build Sep 7 2026".
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - NFC (reading/writing tags)
+        - Scale / weighing
+        - Display / menu / encoder
+        - Web UI
+        - OctoPrint / SpoolManagerExtended
+        - WiFi / OTA
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: tag
+    attributes:
+      label: Tag type
+      description: NFC-only. NTAG213/215/216, NFC-V/ISO 15693, Mifare Classic 1K, or the vendor if it is a foreign tag.
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Debug log
+      description: >
+        Web UI → Debug tab → switch the console on, reproduce the problem, then paste
+        the lines here. Nothing is recorded while it is off.
+      render: text

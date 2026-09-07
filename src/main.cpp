@@ -54,6 +54,15 @@ const int LED_PIN = 2;         // free GPIO used as a status LED
 const int HX711_DOUT = 5;
 const int HX711_SCK = 6;
 const int WS2812_PIN = 48;     // onboard RGB LED (WS2812)
+// External WS2812 on the enclosure front. The onboard LED at GPIO48 sits under the
+// housing where its color isn't readable, so a second pixel mirrors it 1:1 to the
+// outside. Own GPIO rather than chained into GPIO48's data-out: that pad isn't
+// broken out on the DevKitC. GPIO 9 is free, not a strapping pin and has no boot
+// function; 8 stays reserved for a possible I2C, 43 is U0TXD (the CH343 console).
+// Powered from the 3.3V rail (Mini-360), NOT 5V: a WS2812 wants ~0.7 x VDD on DIN, so
+// at 5V it expects 3.5V while the S3 drives 3.3V -- works on the bench but is out of
+// spec. On 3.3V the level is exact. Module carries its own series resistor, no cap.
+const int WS2812_EXT_PIN = 9;
 
 // PN5180 and TFT have SEPARATE SPI buses. Sharing one bus caused the PN5180 to stop
 // reading tags after the TFT init (the GPIO matrix only lets one controller cleanly
@@ -95,6 +104,9 @@ WebServer server(80);
 HX711 scale;
 Preferences prefs;  // NVS storage for the calibration factor
 Adafruit_NeoPixel pixel(1, WS2812_PIN, NEO_GRB + NEO_KHZ800);  // 1x WS2812 status LED
+// Mirrors `pixel` exactly -- never driven independently. Every write goes through
+// ledShow() so both strands stay in lockstep and share the RMT lock (see ledShow()).
+Adafruit_NeoPixel pixelExt(1, WS2812_EXT_PIN, NEO_GRB + NEO_KHZ800);
 
 volatile float g_weight = 0.0;  // latest weight (g), updated by loop()
 // Tare request: the web UI (/tare) and the TFT menu only set this flag. scale.tare()
@@ -145,9 +157,20 @@ volatile uint8_t g_scaleNoiseCount = 0;  // how many of the buffer's slots are f
 // Explicitly NOT triggered by is_ready()==false: at 10 SPS polled every 20ms that is
 // false most of the time by design (roughly 1 in 8 polls sees a sample), so resetting
 // on it would re-init the chip several times a second.
-volatile uint32_t g_scaleStuckSince = 0;    // millis() when raw last CHANGED (0 = unknown yet)
+volatile uint32_t g_scaleStuckSince = 0;    // millis() when raw last MOVED (0 = unknown yet)
+// "Moved" means: away from the value the current stuck-window started at, by more than
+// this many ADC counts. NOT plain inequality against the previous sample: at rest the
+// dither is only a few counts wide, so it repeats a value now and then and sits there
+// for seconds -- which a != check reads as "frozen" and power-cycles a perfectly healthy
+// chip. Measured on the assembled unit: noiseStdDev 22-50 counts, raw wandering across a
+// ~100-count band. 8 counts is comfortably inside that band (so live dither always
+// clears it) and far below any real weight change (~0.02 g at the current calibration
+// factor), while a truly wedged HX711 repeats one exact value forever and never clears
+// it. This is what the comment above always described; the old check just didn't
+// implement it.
 volatile uint32_t g_scaleRecoveries = 0;    // how many times the watchdog fired since boot
 volatile uint32_t g_scaleLastRecoveryMs = 0;
+static const long SCALE_STUCK_TOLERANCE = 8;  // ADC counts, see above
 static const uint32_t SCALE_STUCK_MS = 5000;  // frozen this long -> power-cycle the HX711
 volatile uint8_t g_scaleNoiseIdx = 0;
 
@@ -175,6 +198,27 @@ volatile bool g_menuPreviewReq = false;
 volatile bool g_menuPreviewReqOn = false;
 volatile bool g_menuPreviewStepReq = false;  // ?next=1 -- advance one screen, no encoder
 
+// Test menu (hidden diagnostics, see menu.h MENU_TEST*) LED override: true while
+// either the physical LED test screen or the web UI's "Diagnostics" card owns the
+// pixels directly. ledTick() (below, defined BEFORE menu.h is included, so it cannot
+// reference the MenuScreen enum directly -- hence this decoupled bool) checks this
+// FIRST and backs off entirely, else it would overwrite a test color with the normal
+// idle/flash color on its very next tick.
+volatile bool g_ledTestActive = false;
+
+// Web UI "Diagnostics" card (Debug tab) LED-test-color request. Cross-core: the HTTP
+// handler runs on core 1, ledShow() must run where pixel/pixelExt actually live --
+// consumed in the poll task, same delegate-via-flag pattern as g_menuPreviewReq.
+volatile bool g_testLedReq = false;
+volatile int  g_testLedReqColorIdx = -1;  // index into kTestLedColors, -1 = release override
+
+// Same pattern for the web UI's TFT test pattern. pattern: 0-4 = full-screen color
+// index (see kTestTftColors in menu.h), 10 = font sample, 20 = grayscale ramp, -1 =
+// release (back to whatever the real menu state is).
+volatile bool g_testTftReq = false;
+volatile int  g_testTftReqPattern = -1;
+volatile bool g_tftTestWebActive = false;  // true while the web-triggered pattern owns the TFT
+
 // /nfcdump: raw sector/block dump of an unrecognized tag (debug view fallback when
 // hasExtendedData is false). Same cross-core delegation as the writes below -- the
 // actual Mifare auth+read only ever happens inside pn5180Task, HTTP handlers just
@@ -184,7 +228,19 @@ volatile bool g_nfcDumpPending = false;
 volatile bool g_nfcDumpDone = false;
 volatile bool g_nfcDumpOk = false;
 String g_nfcDumpErr = "";
-MifareBlockDump g_nfcDumpBlocks[47];
+// Sized by the LARGEST carrier, not by Mifare: NTAG216 has 226 pages (888 user bytes +
+// 4 header pages), which packed 4-per-16-byte-row needs 57 rows. Mifare Classic 1K uses
+// only the first 47 (its data blocks), NFC-V at most 57*4 = 228 blocks -- more than any
+// ICODE variant here. Sizing this by the Mifare case instead silently truncated an
+// NTAG216 dump to 188 of its 226 pages, which is exactly the kind of shifted/short image
+// that corrupts a consumer's parsing without failing loudly.
+static const int NFC_DUMP_MAX_ENTRIES = 57;
+MifareBlockDump g_nfcDumpBlocks[NFC_DUMP_MAX_ENTRIES];
+String g_nfcDumpTagType = "";     // "mifareClassic1k" | "ntag" | "nfcv"
+String g_nfcDumpUid = "";
+String g_nfcDumpVariant = "";     // NTAG only: "ntag213"/"ntag215"/"ntag216"
+int g_nfcDumpUnitBytes = 16;      // addressable unit: 16 (Mifare block) or 4 (page/block)
+int g_nfcDumpUnitCount = 0;       // units actually read (rows*4 overshoots on 4-byte carriers)
 int g_nfcDumpCount = 0;
 // Wall-clock duration of the last dump's auth+read loop alone (excludes the probe and
 // the RF reset around it). Reported by /nfcdumpstatus so the cost of a full 16-sector
@@ -309,6 +365,14 @@ inline void displayTouch() { g_blActivity = millis(); }
 bool     g_ssEnabled = true;
 uint16_t g_ssTimeoutSec = 60;          // 1 minute default
 
+// Display off (third and last idle stage, after dimming and the logo screensaver):
+// after g_offTimeoutSec of no activity the backlight goes to 0 and the ST7789 is put
+// to sleep (see displaySleep()). Any activity wakes it. Off by default -- the two
+// milder stages are what most users want, and a fully dark panel is easy to mistake
+// for a crashed device, so it stays an opt-in. NVS-persistent like the others.
+bool     g_offEnabled = false;
+uint16_t g_offTimeoutSec = 300;        // 5 minutes default (when enabled)
+
 // Buzzer control (NVS-persistent). Master on/off in the TFT menu + web UI; mode,
 // volume, and frequency in the web UI only (an active buzzer ignores vol/freq).
 bool     g_buzEnabled = true;   // signal tones on/off
@@ -346,6 +410,11 @@ String g_nfcWriteErr = "";              // error text (task writes, handler read
 // g_nfcWriteKind distinguishes which of the three write functions pn5180Task should run.
 enum NfcWriteKind { NFCWRITE_ID, NFCWRITE_SPOOL, NFCWRITE_ERASE };
 volatile NfcWriteKind g_nfcWriteKind = NFCWRITE_ID;
+// Set when a write is refused because the chosen format's payload does not fit the tag.
+// Reported as structured fields on /nfcwritestatus so a caller can react ("pick a bigger
+// tag" / "switch format") without having to parse the error string.
+volatile int g_nfcWriteCapAvail = -1;   // bytes the tag offers for the payload region
+volatile int g_nfcWriteCapNeeded = -1;  // bytes this spool's data actually needs
 SpoolTagData g_nfcWriteSpoolData;          // filled by the HTTP handler before g_nfcWriteReq is set
 // Which of the two NFC-V Extended formats to use, per-request (SpoolManagerExtended plugin
 // setting, sent with every /nfcwritespool call) -- "extended" (default, OctoScale's own
@@ -566,6 +635,32 @@ static volatile uint32_t g_flashColor = 0;      // active flash color (0 = no fl
 static volatile unsigned long g_flashUntil = 0; // millis until the flash ends
 const uint8_t LED_BRIGHT = 40;            // base brightness (0-255), dimmed
 
+// Global LED brightness, 0-255, applied in ledShow() as a final scale over whatever
+// colour the caller produced (see ledScale()). Deliberately a post-multiplier rather
+// than something the colour-producing code knows about: every status colour, blink
+// pattern and flash keeps its own ratios, they just come out brighter or dimmer as a
+// whole. 255 = the colours exactly as written (the previous behaviour, hence the
+// default). NVS-persistent, set from the web UI.
+uint8_t g_ledBrightness = 255;
+
+// Onboard WS2812 on/off. The external LED on the enclosure front is the one the user
+// actually sees; the S3's own LED ends up inside the closed case, where it is only
+// visible as a glow through the seams. This switches that one off without touching
+// the external mirror. Brightness (above) applies to both regardless.
+bool g_ledOnboard = true;
+
+// The plain single-colour LED on GPIO 2 (LED_PIN), lit while WiFi is connected. Its
+// own switch: it is a bare on/off indicator, unaffected by the brightness setting
+// (no PWM on it) and independent of the RGB strands above.
+bool g_ledPin2 = true;
+
+// Applies g_ledPin2 to the pin. Called whenever the flag or the connection state
+// changes -- the LED only means "WiFi connected", so it is lit exactly when both are
+// true. Cheap enough to just recompute rather than track a previous value.
+static inline void ledPin2Apply() {
+  digitalWrite(LED_PIN, (g_ledPin2 && WiFi.status() == WL_CONNECTED) ? HIGH : LOW);
+}
+
 // Idle color matching the base state (dimmed). While connected the LED pulses a very
 // faint green ("breathing") as a subtle heartbeat; a flash (brighter) stands out
 // clearly against it.
@@ -594,6 +689,15 @@ static uint32_t idleColor() {
   // an erase is just as interruption-sensitive as a write.
   if (g_nfcWritePending && !g_nfcWriteDone) {
     // ~500ms period on/off -- clearly a blink, not the DB check's steady cyan.
+    bool on = (millis() % 500) < 250;
+    return on ? pixel.Color(0, 0, LED_BRIGHT * 2) : 0;
+  }
+  // Raw dump in flight: same blue blink, same reasoning. A full-image dump is a
+  // multi-second RF job that must not be interrupted by lifting the tag (an NTAG215
+  // page walk measured ~1.7s, a 16-sector Mifare auth+read loop noticeably longer),
+  // so it gets the same "still working, leave the tag alone" signal as a write rather
+  // than a fixed-duration flash that could expire mid-dump.
+  if (g_nfcDumpPending && !g_nfcDumpDone) {
     bool on = (millis() % 500) < 250;
     return on ? pixel.Color(0, 0, LED_BRIGHT * 2) : 0;
   }
@@ -643,13 +747,70 @@ static void ledFlash(uint32_t color, unsigned long ms) {
 // Observed from both sides -- one crash backtrace through loop(), a later one through
 // pn5180Task. Whoever holds the lock finishes its cycle before the other starts; a
 // skipped frame is invisible on a status LED, so the loser simply drops its update
-// rather than waiting (never block pn5180Task on the LED).
+// rather than waiting (never block pn5180Task on the LED). The lock itself lives in
+// ledShow() below, which is the only thing that touches either pixel.
 static portMUX_TYPE g_ledMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool g_ledShowBusy = false;
 
+// Single funnel for BOTH pixels. Everything that wants to change the LED goes through
+// here -- ledTick(), buzzerLedSet(), setup() and the pre-blocking-HTTP paint in
+// runDbCheck(). Two reasons it must be the only door:
+//   1) The external pixel is a mirror, not an independent light. Setting one strand
+//      without the other is always a bug, so there is no API that can do it.
+//   2) The RMT lock now has to cover twice the work. pixelExt.show() runs the exact
+//      same rmt_driver_install()/uninstall() cycle as pixel.show() (Adafruit's ESP32
+//      backend does that per frame), so with two strands there are two install/uninstall
+//      pairs per update -- twice the window for the queue.c:820 race that already bit
+//      us here. Three call sites used to bypass the lock entirely; they now don't.
+// Returns false if the other core holds the lock: the caller's frame is dropped rather
+// than waited on (a skipped status-LED frame is invisible, and pn5180Task must never
+// block on the LED).
+// Not static: buzzer.h forward-declares it (included above, before this definition).
+// Scales all three channels by g_ledBrightness/255. Done here, on the packed colour,
+// instead of via Adafruit's setBrightness(): that one re-scales its own stored pixel
+// buffer on every show() and rounds each time, which visibly shifts hue on the very
+// low values this project uses (LED_BRIGHT/2 = 20 of 255). One multiply per channel
+// against the caller's original value has no such drift. +127 rounds to nearest.
+static inline uint32_t ledScale(uint32_t c) {
+  uint8_t b = g_ledBrightness;
+  if (b == 255) return c;
+  uint8_t r = (uint8_t)(((((c >> 16) & 0xFF) * b) + 127) / 255);
+  uint8_t g = (uint8_t)((((((c >> 8) & 0xFF) * b)) + 127) / 255);
+  uint8_t bl = (uint8_t)((((c & 0xFF) * b) + 127) / 255);
+  return ((uint32_t)r << 16) | ((uint32_t)g << 8) | bl;
+}
+
+bool ledShow(uint32_t color) {
+  bool mine = false;
+  taskENTER_CRITICAL(&g_ledMux);
+  if (!g_ledShowBusy) { g_ledShowBusy = true; mine = true; }
+  taskEXIT_CRITICAL(&g_ledMux);
+  if (!mine) return false;
+  color = ledScale(color);
+  // The onboard strand can be muted independently (g_ledOnboard). show() still runs
+  // for it -- the WS2812 holds its last value until clocked again, so "off" has to be
+  // written out, not merely skipped.
+  pixel.setPixelColor(0, g_ledOnboard ? color : 0);
+  pixel.show();
+  pixelExt.setPixelColor(0, color);
+  pixelExt.show();
+  taskENTER_CRITICAL(&g_ledMux);
+  g_ledShowBusy = false;
+  taskEXIT_CRITICAL(&g_ledMux);
+  return true;
+}
+
+// Last colour actually pushed to the strands. File-scope (not a static inside
+// ledTick()) so a brightness change can invalidate it -- see the /led handler: the
+// colour itself doesn't change when only the brightness does, so without forcing a
+// mismatch here ledTick() would consider the LED up to date and the new brightness
+// would not appear until the next status change.
+static volatile uint32_t g_ledLastShown = 0xFFFFFFFF;
+
 static void ledTick() {
-  // Cross-core, so not a plain static: both cores compare and update it.
-  static volatile uint32_t lastShown = 0xFFFFFFFF;
+  // Test menu (physical screen or web UI) owns the pixels directly right now -- back
+  // off completely so ledTick() doesn't fight it every ~10ms. See g_ledTestActive.
+  if (g_ledTestActive) return;
   // OTA in progress overrides everything (including a buzzer tone mid-flight) -> the
   // traffic-light color is the only thing the LED should show right now.
   if (!g_otaInProgress && g_buzLedColor) return;  // a buzzer tone is driving the LED
@@ -662,21 +823,13 @@ static void ledTick() {
     g_flashColor = 0;
     want = idleColor();
   }
-  if (want != lastShown) {
+  if (want != g_ledLastShown) {
     // Claim the RMT driver for this update; if the other core is mid-show(), skip this
     // frame instead of racing it. lastShown is only advanced by the core that actually
     // draws, so the skipped update is retried on the next tick (~10ms) rather than lost.
-    bool mine = false;
-    taskENTER_CRITICAL(&g_ledMux);
-    if (!g_ledShowBusy) { g_ledShowBusy = true; mine = true; }
-    taskEXIT_CRITICAL(&g_ledMux);
-    if (!mine) return;
-    lastShown = want;
-    pixel.setPixelColor(0, want);
-    pixel.show();
-    taskENTER_CRITICAL(&g_ledMux);
-    g_ledShowBusy = false;
-    taskEXIT_CRITICAL(&g_ledMux);
+    // lastShown is only advanced when we actually drew, so a frame lost to the other
+    // core is retried on the next tick (~10ms) rather than dropped for good.
+    if (ledShow(want)) g_ledLastShown = want;
   }
 }
 
@@ -769,8 +922,7 @@ static void runDbCheck() {
   g_flowDbRequest = false;
   // spoolExists() blocks (HTTP) -> ledTick() won't run again until it returns, so set
   // the solid "working" color up front instead of only after the fact.
-  pixel.setPixelColor(0, idleColor());
-  pixel.show();
+  ledShow(idleColor());
   String name, err;
   bool known;
   if (g_flowLookupByCode) {
@@ -835,7 +987,7 @@ static void runDbCheck() {
 }
 
 // Resets the flow (cancel / after completion).
-static void flowReset() {
+static void flowReset(bool rearmSameTag = true) {
   g_flowState = FLOW_IDLE;
   g_flowSpoolId = -1;
   g_flowSpoolName = "";
@@ -855,7 +1007,18 @@ static void flowReset() {
   g_flowColorName = "";
   g_flowLookupByCode = false;
   g_flowLookupUid = "";
-  g_lastUid = "";  // allows re-triggering on the same tag
+  // rearmSameTag: clear the "already handled" latch so the very same tag triggers the
+  // flow again on the next poll. Right when the tag was REMOVED (the poll's goneStreak
+  // path) -- the next placement must be seen as new, even if it is the same spool.
+  //
+  // WRONG when the user backed out of the flow with the tag still ON the reader: the
+  // latch would clear, the next poll (500 ms) would see a "new" tag and reopen the very
+  // menu the user just dismissed, roughly every 1.5 s. That also froze the weight
+  // readout, because flowOnTagPresent does a BLOCKING DB/OctoPrint lookup. The user
+  // could never reach the live scale display to update a spool's weight on the device
+  // -- the same task that draws the weight was stuck in HTTP. Keep the latch in that
+  // case: the tag stays "handled" until it is physically lifted.
+  if (rearmSameTag) g_lastUid = "";
 }
 
 // --- Blocking flow transitions (pure logic, NO server.send) -----------------
@@ -951,7 +1114,8 @@ void startWebServer() {
   server.on("/backlight", []() {
     if (server.hasArg("level")) {
       int lv = server.arg("level").toInt();
-      if (lv < 0) lv = 0; if (lv > 255) lv = 255;
+      if (lv < 0) lv = 0;
+      if (lv > 255) lv = 255;
       g_blActive = (uint8_t)lv;      // new active brightness
       displaySetBacklight((uint8_t)lv);
       displayTouch();                // using the slider counts as activity
@@ -984,6 +1148,16 @@ void startWebServer() {
       int v = server.arg("ssTimeout").toInt(); if (v < 5) v = 5; if (v > 3600) v = 3600;
       g_ssTimeoutSec = (uint16_t)v; changed = true;
     }
+    if (server.hasArg("offEnabled")) {
+      g_offEnabled = (server.arg("offEnabled") == "1"); changed = true;
+    }
+    if (server.hasArg("offTimeout")) {
+      // Lower bound 10s: below that the panel's ~140ms wake latency starts to dominate
+      // (the ST7789 sleep-out timing), which makes the device feel sluggish rather than
+      // power-saving. Upper bound matches the other two stages.
+      int v = server.arg("offTimeout").toInt(); if (v < 10) v = 10; if (v > 3600) v = 3600;
+      g_offTimeoutSec = (uint16_t)v; changed = true;
+    }
     if (changed) {
       Preferences p; p.begin("octoscale", false);
       p.putUChar("blActive", g_blActive);
@@ -991,6 +1165,8 @@ void startWebServer() {
       p.putUShort("blTimeout", g_blTimeoutSec);
       p.putBool("ssEnabled", g_ssEnabled);
       p.putUShort("ssTimeout", g_ssTimeoutSec);
+      p.putBool("offEnabled", g_offEnabled);
+      p.putUShort("offTimeout", g_offTimeoutSec);
       p.end();
       displayTouch();
     }
@@ -1000,6 +1176,8 @@ void startWebServer() {
     doc["timeout"] = g_blTimeoutSec;
     doc["ssEnabled"] = g_ssEnabled;
     doc["ssTimeout"] = g_ssTimeoutSec;
+    doc["offEnabled"] = g_offEnabled;
+    doc["offTimeout"] = g_offTimeoutSec;
     String out; serializeJson(doc, out);
     server.send(200, "application/json", out);
   });
@@ -1038,6 +1216,64 @@ void startWebServer() {
     doc["freq"] = g_buzFreq;
     String out; serializeJson(doc, out);
     server.send(200, "application/json", out);
+  });
+
+  // Global LED brightness. No args -> current value as JSON; with ?level=N (0..255)
+  // -> set + save. Scales every status colour, blink and flash uniformly in
+  // ledShow()/ledScale() -- hues and patterns are untouched.
+  server.on("/led", []() {
+    bool changed = false;
+    if (server.hasArg("level")) {
+      int v = server.arg("level").toInt();
+      if (v < 0) v = 0;
+      if (v > 255) v = 255;
+      g_ledBrightness = (uint8_t)v; changed = true;
+    }
+    if (server.hasArg("onboard")) {
+      g_ledOnboard = server.arg("onboard").toInt() != 0; changed = true;
+    }
+    if (server.hasArg("pin2")) {
+      g_ledPin2 = server.arg("pin2").toInt() != 0; changed = true;
+      ledPin2Apply();   // plain GPIO write, safe from either core
+    }
+    if (changed) {
+      Preferences p; p.begin("octoscale", false);
+      p.putUChar("ledBright", g_ledBrightness);
+      p.putBool("ledOnboard", g_ledOnboard);
+      p.putBool("ledPin2", g_ledPin2);
+      p.end();
+      // The colour itself is unchanged, only its scaling/routing -- so force ledTick()
+      // (core 0) to repaint on its next pass rather than touching the strands here.
+      g_ledLastShown = 0xFFFFFFFF;
+    }
+    JsonDocument doc;
+    doc["level"] = g_ledBrightness;
+    doc["onboard"] = g_ledOnboard;
+    doc["pin2"] = g_ledPin2;
+    String out; serializeJson(doc, out);
+    server.send(200, "application/json", out);
+  });
+
+  // Diagnostics card (web UI Debug tab) -- LED test color. idx: 0-4 = kTestLedColors
+  // index (menu.h), -1 = release the override (ledTick() resumes normal behavior).
+  // Fire-and-forget: no state to report back, only a one-shot color change.
+  server.on("/testled", []() {
+    if (server.hasArg("idx")) {
+      g_testLedReqColorIdx = server.arg("idx").toInt();
+      g_testLedReq = true;
+    }
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // Diagnostics card -- TFT test pattern. pattern: 0-4 = full-screen color index, 10 =
+  // font sample, 20 = grayscale ramp, -1 = release (back to whatever menuTick() would
+  // normally be showing). Same fire-and-forget shape as /testled.
+  server.on("/testtft", []() {
+    if (server.hasArg("pattern")) {
+      g_testTftReqPattern = server.arg("pattern").toInt();
+      g_testTftReq = true;
+    }
+    server.send(200, "application/json", "{\"ok\":true}");
   });
 
   server.on("/weight", []() {
@@ -1338,6 +1574,35 @@ void startWebServer() {
       ext["material"] = e.material;
       ext["vendor"] = e.vendor;
       ext["color"] = e.color;
+      // v4 multi-colour, reported as a rebuilt grammar string plus the parsed parts.
+      // colorFull is what a caller would write back verbatim; the array and the two
+      // flags are there so a consumer doesn't have to re-parse the grammar itself.
+      {
+        String full;
+        if (e.isRainbow) full = "rainbow";
+        else {
+          if (e.isTransparent) full = "transparent";
+          char hx[10];
+          for (int i = 0; i < e.colorCount && i < 3; i++) {
+            snprintf(hx, sizeof(hx), "#%02X%02X%02X",
+                     e.colorRgb[i][0], e.colorRgb[i][1], e.colorRgb[i][2]);
+            if (i == 0) full += e.isTransparent ? ":" : "";
+            else full += ";";
+            full += hx;
+          }
+        }
+        ext["colorFull"] = full;
+        ext["colorCount"] = e.colorCount;
+        ext["isTransparent"] = e.isTransparent;
+        ext["isRainbow"] = e.isRainbow;
+        JsonArray cols = ext["colors"].to<JsonArray>();
+        for (int i = 0; i < e.colorCount && i < 3; i++) {
+          char hx[10];
+          snprintf(hx, sizeof(hx), "#%02X%02X%02X",
+                   e.colorRgb[i][0], e.colorRgb[i][1], e.colorRgb[i][2]);
+          cols.add(hx);
+        }
+      }
       ext["colorName"] = e.colorName;
       ext["diameter"] = e.diameter;
       ext["diameterTolerance"] = e.diameterTolerance;
@@ -1456,7 +1721,22 @@ void startWebServer() {
       doc["ok"] = g_nfcDumpOk;
       doc["err"] = g_nfcDumpErr;
       doc["durationMs"] = g_nfcDumpMs;              // auth+read loop only, excludes probe/RF reset
-      doc["authOkSectors"] = g_nfcDumpAuthOkSectors;  // of 16 -- 0 means every sector's key was wrong
+      doc["authOkSectors"] = g_nfcDumpAuthOkSectors;  // Mifare only; 0 on NTAG/NFC-V (no auth concept)
+      doc["tagType"] = g_nfcDumpTagType;   // "mifareClassic1k" | "ntag" | "nfcv"
+      doc["uid"] = g_nfcDumpUid;
+      // Bytes per addressable unit: 16 for a Mifare block, 4 for an NTAG page or an
+      // NFC-V block. Each row below still carries 16 bytes -- on the 4-byte carriers
+      // that is FOUR consecutive units packed together, and "block" names the first of
+      // them. A consumer converts a row index to an absolute byte offset as
+      // row * 16, and to a unit number as block (already absolute).
+      doc["unitBytes"] = g_nfcDumpUnitBytes;
+      doc["unitsPerRow"] = 16 / g_nfcDumpUnitBytes;
+      // Exact unit count. The rows are 16 bytes each, so a carrier whose unit count is
+      // not a multiple of 4 (NTAG215: 130 pages -> 33 rows = 132 pages' worth) has a
+      // zero-padded tail in the last row. Without this a consumer cannot tell the
+      // padding apart from real tag content and reads 8 bytes too many.
+      doc["unitCount"] = g_nfcDumpUnitCount;
+      if (g_nfcDumpVariant.length()) doc["ntagVariant"] = g_nfcDumpVariant;
       JsonArray blocks = doc["blocks"].to<JsonArray>();
       for (int i = 0; i < g_nfcDumpCount; i++) {
         JsonObject b = blocks.add<JsonObject>();
@@ -1589,6 +1869,14 @@ void startWebServer() {
       if (g_nfcReadTagType == "ntag") {
         doc["startPage"] = g_nfcReadStartPage;  // always 0 -- absolute page offsets
         doc["ntagVariant"] = g_nfcReadNtagVariant;  // diagnostics only, not for logic
+      } else if (g_nfcReadTagType == "nfcv") {
+        // Block-addressed, starting at block 0, so byte offsets are absolute like the
+        // other two carriers. blockSize is fixed at 4 for every ISO15693 tag this
+        // firmware talks to; blockCount is what the walk actually reached, which is the
+        // honest size (getSystemInfo's numBlocks is not always backed by readable
+        // blocks). No `sectors` array: ISO15693 has no sector or auth concept.
+        doc["blockSize"] = NFCV_BLOCK_SIZE;
+        doc["blockCount"] = (int)(g_nfcReadHex.length() / 2 / NFCV_BLOCK_SIZE);
       } else if (g_nfcReadTagType == "mifareClassic1k") {
         // Which sectors actually authenticated. A caller needs this to tell real data
         // apart from the zero-fill that stands in for an unreadable sector.
@@ -1679,6 +1967,10 @@ void startWebServer() {
     d.material   = String((const char *)(doc["material"]   | ""));
     d.vendor     = String((const char *)(doc["vendor"]     | ""));
     d.color      = String((const char *)(doc["color"]      | ""));
+    // Parse SpoolManagerExtended's colour grammar into the v4 multi-colour fields.
+    // d.color keeps the raw string (the single-colour write paths still parse it
+    // themselves for the primary slot); these carry colours 2-3 and the flags.
+    pn5180ParseColorGrammar(d.color, d.colorRgb, d.colorCount, d.isTransparent, d.isRainbow);
     d.colorName  = String((const char *)(doc["colorName"]  | ""));
     // Numeric fields: SpoolManagerExtended's own API returns weights as strings elsewhere in
     // this codebase (see octoSpoolInfo's comment), but the plugin sends this payload
@@ -1839,6 +2131,15 @@ void startWebServer() {
       if (g_nfcWriteKind == NFCWRITE_SPOOL) {
         doc["format"] = g_nfcWriteFormat;
         doc["bytesWritten"] = g_nfcWriteBytesWritten;
+        // Capacity refusal (currently OpenPrintTag only): structured so a caller can
+        // tell "this tag is too small for the data you picked" apart from a transport
+        // failure, and show the two numbers, without parsing the error string.
+        if (g_nfcWriteCapAvail >= 0 || g_nfcWriteCapNeeded >= 0) {
+          doc["capacityAvailable"] = g_nfcWriteCapAvail;
+          doc["capacityNeeded"] = g_nfcWriteCapNeeded;
+          if (!g_nfcWriteOk && g_nfcWriteCapNeeded > g_nfcWriteCapAvail)
+            doc["failureReason"] = "tagTooSmall";
+        }
         JsonArray dropped = doc["droppedFields"].to<JsonArray>();
         if (g_nfcWriteDroppedFields.length()) {
           int start = 0;
@@ -2016,7 +2317,10 @@ void startWebServer() {
   });
 
   server.on("/flow/cancel", []() {
-    flowReset();
+    // Same reasoning as the TFT's back button (see flowReset): the user dismissed the
+    // flow while the tag is most likely still on the reader, so keep it "handled"
+    // rather than reopening the flow on the next poll.
+    flowReset(false);
     server.send(200, "application/json", flowStatusJson());
   });
 
@@ -2520,11 +2824,18 @@ void scaleTask(void *param) {
     // is_ready() branch on purpose -- the failure mode being caught is precisely one
     // where that branch stops being entered, so a check inside it would never run.
     if (g_scaleReady) {
-      static long lastRawSeen = 0;
-      static bool haveLastRaw = false;
+      // Anchor, not "previous sample": the window only restarts once the reading has
+      // actually travelled SCALE_STUCK_TOLERANCE counts away from where it started.
+      // Comparing against the previous sample instead would let a slow drift of one
+      // count at a time reset the timer forever and never catch a real freeze.
+      static long stuckAnchorRaw = 0;
+      static bool haveAnchor = false;
       uint32_t now = millis();
-      if (!haveLastRaw) { lastRawSeen = g_scaleRawLast; haveLastRaw = true; g_scaleStuckSince = now; }
-      else if (g_scaleRawLast != lastRawSeen) { lastRawSeen = g_scaleRawLast; g_scaleStuckSince = now; }
+      long raw = g_scaleRawLast;
+      if (!haveAnchor) { stuckAnchorRaw = raw; haveAnchor = true; g_scaleStuckSince = now; }
+      else if (labs(raw - stuckAnchorRaw) > SCALE_STUCK_TOLERANCE) {
+        stuckAnchorRaw = raw; g_scaleStuckSince = now;
+      }
       else if (g_scaleStuckSince && (now - g_scaleStuckSince) >= SCALE_STUCK_MS) {
         // Frozen. power_down() holds SCK high >60us, which is the HX711's own reset:
         // it drops the internal analog front end and the serial state machine, so a
@@ -2537,8 +2848,11 @@ void scaleTask(void *param) {
         g_scaleRecoveries++;
         g_scaleLastRecoveryMs = now;
         g_scaleStuckSince = now;        // give it a fresh window before trying again
-        dbgLogf("Scale: HX711 frozen for %ums (raw stuck at %ld) -> power-cycled, recovery #%u",
-                SCALE_STUCK_MS, lastRawSeen, (unsigned)g_scaleRecoveries);
+        stuckAnchorRaw = raw;           // re-anchor too, else the next window compares
+                                        // against a value from before the reset
+        dbgLogf("Scale: HX711 frozen for %ums (raw pinned at %ld +/-%ld) -> power-cycled, recovery #%u",
+                SCALE_STUCK_MS, stuckAnchorRaw, SCALE_STUCK_TOLERANCE,
+                (unsigned)g_scaleRecoveries);
         Serial.printf("Scale: HX711 frozen -> power-cycled (#%u)\n", (unsigned)g_scaleRecoveries);
       }
     }
@@ -2724,6 +3038,8 @@ void setup() {
 
   pixel.begin();
   pixel.setBrightness(255);  // dimming is done via the color values (LED_BRIGHT)
+  pixelExt.begin();
+  pixelExt.setBrightness(255);
   g_ledState = LED_BOOT;     // blue: boot / WiFi connecting
   ledTick();
 
@@ -2776,7 +3092,7 @@ void setup() {
 
   Serial.print("WiFi connected. IP: ");
   Serial.println(WiFi.localIP());
-  digitalWrite(LED_PIN, HIGH);  // internal LED on = connected
+  ledPin2Apply();               // GPIO 2 LED on = connected (unless switched off)
   g_ledState = LED_CONNECTED;   // green status LED
   ledTick();
 
@@ -2799,9 +3115,18 @@ void setup() {
     g_buzFreq = p.getUShort("buzFreq", 2700);
     g_ssEnabled = p.getBool("ssEnabled", true);
     g_ssTimeoutSec = p.getUShort("ssTimeout", 60);
+    g_offEnabled = p.getBool("offEnabled", false);
+    g_offTimeoutSec = p.getUShort("offTimeout", 300);
+    g_ledBrightness = p.getUChar("ledBright", 255);
+    g_ledOnboard = p.getBool("ledOnboard", true);
+    g_ledPin2 = p.getBool("ledPin2", true);
     g_dbgLogEnabled = p.getBool("dbgLogEn", false);
+    g_menuDark = p.getBool("menuDark", true);   // TFT theme, dark by default
     p.end();
   }
+  menuApplyTheme();  // the palette globals still hold the compile-time default
+  ledPin2Apply();    // WiFi connected before the NVS load above -> re-apply the saved
+                     // setting, otherwise a disabled GPIO 2 LED would stay lit
   displaySetBacklight(g_blActive);  // apply the saved active brightness
   displayTouch();                   // start the timeout countdown now (not dimmed)
   buzzerInit();
@@ -2898,6 +3223,8 @@ void pn5180Task(void *param) {
       // Found via soak testing: "Tag written" from write N held the full 5s regardless
       // of write N+1 already starting underneath it.
       g_nfcMenuResultPending = false;
+      g_nfcWriteCapAvail = -1;   // stale values must not leak into this write's result
+      g_nfcWriteCapNeeded = -1;
       // Force the lock screen onto the TFT for THIS write before the blocking call
       // below runs. menuTick() at the top of the loop only sees g_nfcWritePending if
       // some earlier iteration happened to catch it first -- back-to-back writes (e.g.
@@ -2913,7 +3240,12 @@ void pn5180Task(void *param) {
         dbgLogf("pn5180Task: spool write request picked up, databaseId=%ld", g_nfcWriteSpoolData.databaseId);
         String format, dropped;
         int bytesWritten = 0;
-        ok = pn5180WriteSpoolTagOpt(g_nfcWriteSpoolData, format, bytesWritten, dropped, err, g_nfcWriteNfcvFormat, g_nfcWriteNtagFormat);
+        int capAvail = -1, capNeeded = -1;
+        ok = pn5180WriteSpoolTagOpt(g_nfcWriteSpoolData, format, bytesWritten, dropped, err,
+                                    g_nfcWriteNfcvFormat, g_nfcWriteNtagFormat,
+                                    &capAvail, &capNeeded);
+        g_nfcWriteCapAvail = capAvail;
+        g_nfcWriteCapNeeded = capNeeded;
         g_nfcWriteFormat = format;
         g_nfcWriteBytesWritten = bytesWritten;
         g_nfcWriteDroppedFields = dropped;
@@ -2978,18 +3310,104 @@ void pn5180Task(void *param) {
       g_nfcDumpReq = false;
       g_nfcDumpErr = "";
       g_nfcDumpCount = 0;
+      // Full probe (not pn5180ProbeNfcA): NFC-V has to be recognised here too, and the
+      // probe tries ISO15693 first -- an NFC-A-only probe would report "no tag present"
+      // for every ICODE tag on the reader.
       PN5180ProbeResult pr;
-      bool ok = pn5180ProbeNfcA(pr);
+      bool ok = pn5180Probe(pr);
+      g_nfcDumpTagType = "";
+      g_nfcDumpUid = pr.uid;
+      g_nfcDumpUnitBytes = 16;
+      g_nfcDumpVariant = "";
       if (!ok || pr.uid.length() == 0) {
         g_nfcDumpErr = "no tag present";
         ok = false;
-      } else if (!(pr.sak == 0x08 || pr.sak == 0x18 || pr.sak == 0x09 || pr.sak == 0x28)) {
-        g_nfcDumpErr = "dump only supported for Mifare Classic (this tag: " + String(pn5180NfcaProduct(pr.atqa, pr.sak)) + ")";
-        ok = false;
+      } else if (pr.type == PN5180_TAG_NFCV) {
+        // --- NFC-V (ISO15693): keyless block walk, 4-byte blocks packed 4-per-entry
+        // so the JSON shape stays identical to the Mifare one (16 bytes per row).
+        g_nfcDumpTagType = "nfcv";
+        g_nfcDumpUnitBytes = NFCV_BLOCK_SIZE;
+        dbgLogf("pn5180Task: dump request picked up (NFC-V), uid=%s", pr.uid.c_str());
+        uint8_t uidRaw[8];
+        if (!pn5180UidHexToBytes8Reversed(pr.uid, uidRaw)) {
+          g_nfcDumpErr = "could not decode NFC-V UID";
+          ok = false;
+        } else {
+          uint32_t dumpT0 = millis();
+          // Cap at the struct's capacity (47 entries x 16 B = 188 blocks of 4 B).
+          int maxBlocks = min((int)(NFC_DUMP_MAX_ENTRIES * 16 / NFCV_BLOCK_SIZE),
+                              pr.numBlocks > 0 ? (int)pr.numBlocks : 64);
+          static uint8_t nfcvBuf[NFC_DUMP_MAX_ENTRIES * 16];
+          memset(nfcvBuf, 0, sizeof(nfcvBuf));
+          int gotBlocks = pn5180DumpNfcvBlocks(uidRaw, nfcvBuf, maxBlocks);
+          g_nfcDumpMs = millis() - dumpT0;
+          // Pack into 16-byte rows; a partial trailing row is kept (zero-padded) so no
+          // read data is dropped, and readOk marks how far the tag actually went.
+          g_nfcDumpCount = (gotBlocks * NFCV_BLOCK_SIZE + 15) / 16;
+          g_nfcDumpUnitCount = gotBlocks;
+          for (int i = 0; i < g_nfcDumpCount; i++) {
+            g_nfcDumpBlocks[i].block = (uint8_t)(i * 16 / NFCV_BLOCK_SIZE);  // first block in row
+            g_nfcDumpBlocks[i].sectorAuthOk = true;   // no auth concept on ISO15693
+            g_nfcDumpBlocks[i].readOk = true;
+            memcpy(g_nfcDumpBlocks[i].data, nfcvBuf + i * 16, 16);
+          }
+          g_nfcDumpAuthOkSectors = 0;  // not applicable
+          ok = gotBlocks > 0;
+          if (!ok) g_nfcDumpErr = "dump failed (no blocks read)";
+          dbgLogf("pn5180Task: NFC-V dump ok=%d blocks=%d rows=%d ms=%lu",
+                  ok, gotBlocks, g_nfcDumpCount, (unsigned long)g_nfcDumpMs);
+        }
+      } else if (pr.type == PN5180_TAG_NFCA &&
+                 !(pr.sak == 0x08 || pr.sak == 0x18 || pr.sak == 0x09 || pr.sak == 0x28)) {
+        // --- NTAG / Ultralight: keyless page walk from page 0, 4-byte pages packed
+        // 4-per-entry. Covers NTAG213/215/216 -- the size comes from GET_VERSION, and
+        // the walk stops at the first unreadable page regardless.
+        g_nfcDumpTagType = "ntag";
+        g_nfcDumpUnitBytes = 4;
+        // pn5180Probe() ends with reset()+setupRF(), so the card is NO LONGER selected
+        // here -- and both GET_VERSION and the page walk require a live selection. Without
+        // this re-select the variant came back NTAG_UNKNOWN (reported as "ntag213", the
+        // fallback) and every page read failed: "dump failed (no pages read)". Same
+        // re-select the /nfcreadstart path does for exactly this reason.
+        PN5180ProbeResult reSel;
+        uint32_t dumpT0 = millis();
+        int gotPages = 0;
+        NtagVariant variant = NTAG_UNKNOWN;
+        int maxPages = 0;
+        static uint8_t ntagBuf[NFC_DUMP_MAX_ENTRIES * 16];
+        memset(ntagBuf, 0, sizeof(ntagBuf));
+        if (!pn5180ProbeNfcA(reSel) || reSel.uid != pr.uid) {
+          g_nfcDumpErr = "tag moved away before the dump could start";
+        } else {
+          variant = pn5180NtagGetVersion();   // must follow the SELECT directly
+          g_nfcDumpVariant = ntagVariantName(variant);
+          dbgLogf("pn5180Task: dump request picked up (NTAG %s), uid=%s",
+                  g_nfcDumpVariant.c_str(), pr.uid.c_str());
+          // User bytes + the 4 header pages (UID/lock/CC), capped by the struct.
+          maxPages = ntagUserBytes(variant) / 4 + 4;
+          if (maxPages > NFC_DUMP_MAX_ENTRIES * 4) maxPages = NFC_DUMP_MAX_ENTRIES * 4;
+          gotPages = pn5180DumpNtagPages(ntagBuf, maxPages);
+        }
+        g_nfcDumpMs = millis() - dumpT0;
+        g_nfcDumpCount = (gotPages * 4 + 15) / 16;
+        g_nfcDumpUnitCount = gotPages;
+        for (int i = 0; i < g_nfcDumpCount; i++) {
+          g_nfcDumpBlocks[i].block = (uint8_t)(i * 4);  // first page in row
+          g_nfcDumpBlocks[i].sectorAuthOk = true;   // no auth concept on NTAG
+          g_nfcDumpBlocks[i].readOk = true;
+          memcpy(g_nfcDumpBlocks[i].data, ntagBuf + i * 16, 16);
+        }
+        g_nfcDumpAuthOkSectors = 0;  // not applicable
+        ok = gotPages > 0;
+        if (!ok && g_nfcDumpErr.length() == 0) g_nfcDumpErr = "dump failed (no pages read)";
+        dbgLogf("pn5180Task: NTAG dump ok=%d pages=%d rows=%d ms=%lu",
+                ok, gotPages, g_nfcDumpCount, (unsigned long)g_nfcDumpMs);
       } else {
+        g_nfcDumpTagType = "mifareClassic1k";
         dbgLogf("pn5180Task: dump request picked up, uid=%s", pr.uid.c_str());
         uint32_t dumpT0 = millis();
         g_nfcDumpCount = pn5180DumpMifareClassic1k(pr.uid, g_nfcDumpBlocks);
+        g_nfcDumpUnitCount = g_nfcDumpCount;   // 1 unit per row on Mifare
         g_nfcDumpMs = millis() - dumpT0;
         // Count distinct sectors that authenticated (blocks carry the per-sector result,
         // 3 data blocks per sector) -- separates "wrong key everywhere" from a partial
@@ -3027,19 +3445,45 @@ void pn5180Task(void *param) {
       bool retryable = true;
       PN5180ProbeResult pr;
       if (!pn5180ProbeNfcA(pr) || pr.uid.length() == 0) {
-        // Distinguish "nothing on the reader" from "something is there, but it isn't
-        // NFC-A". An ISO15693/NFC-V tag answers a completely different protocol, so the
-        // NFC-A probe above sees nothing -- reporting that as "no tag present" would
-        // send a caller into an endless retry on a tag that will never be readable
-        // here. Raw reads are NFC-A only (Mifare Classic + NTAG/Ultralight).
+        // Nothing on NFC-A -- try ISO15693 before concluding the reader is empty.
+        // pn5180ProbeNfcA() leaves the reader in type-A mode (it does NOT restore
+        // ISO15693 on failure), so getInventory() here would ALWAYS fail without the
+        // reset()+setupRF() below, regardless of what is actually on the reader. That
+        // was a real bug: an NFC-V tag reported "no tag present" with retryable:true,
+        // sending callers into an endless retry on a tag sitting right there --
+        // /nfcprobe saw it fine, because pn5180Probe() switches modes in this order.
+        g_pn5180->reset(); g_pn5180->setupRF();
         uint8_t nfcvUid[8] = {0};
         bool isNfcv = (g_pn5180->getInventory(nfcvUid) == ISO15693_EC_OK);
-        g_pn5180->reset(); g_pn5180->setupRF();  // a failed inventory wedges the RF state
         if (isNfcv) {
-          g_nfcReadErr = "unsupported tag type (NFC-V / ISO15693) -- raw read supports "
-                         "Mifare Classic and NTAG/Ultralight only";
+          // NFC-V raw read: keyless, UID-addressed block walk, same primitive the dump
+          // uses. No sector/auth concept, so `sectors` (a Mifare notion, 0-15) does not
+          // apply here and is ignored -- the whole tag is returned, exactly like the
+          // NTAG page walk does.
           g_nfcReadTagType = "nfcv";
-          retryable = false;  // re-reading the same tag will never succeed
+          char ubuf[3];
+          for (int i = 7; i >= 0; i--) { snprintf(ubuf, sizeof(ubuf), "%02X", nfcvUid[i]); g_nfcReadUid += ubuf; }
+          uint32_t t0 = millis();
+          static uint8_t nfcvBuf[NFC_DUMP_MAX_ENTRIES * 16];
+          memset(nfcvBuf, 0, sizeof(nfcvBuf));
+          int maxBlocks = (int)(sizeof(nfcvBuf) / NFCV_BLOCK_SIZE);
+          int gotBlocks = pn5180DumpNfcvBlocks(nfcvUid, nfcvBuf, maxBlocks);
+          g_nfcReadMs = millis() - t0;
+          if (gotBlocks > 0) {
+            int nbytes = gotBlocks * NFCV_BLOCK_SIZE;
+            g_nfcReadHex.reserve(nbytes * 2 + 1);
+            char hx[3];
+            for (int i = 0; i < nbytes; i++) {
+              snprintf(hx, sizeof(hx), "%02x", nfcvBuf[i]);
+              g_nfcReadHex += hx;
+            }
+            ok = true;
+          } else {
+            // Inventory answered but not a single block read -> the tag left the field
+            // between the two, which is worth retrying.
+            g_nfcReadErr = "NFC-V tag answered inventory but no block could be read";
+          }
+          g_pn5180->reset(); g_pn5180->setupRF();
         } else {
           g_nfcReadErr = "no tag present";
         }
@@ -3163,6 +3607,42 @@ void pn5180Task(void *param) {
       }
     }
 
+    // 1d) Diagnostics card (web UI Debug tab) -- LED test color. Reuses the exact same
+    // g_ledTestActive override + ledShow() that the physical MENU_TEST_LED screen uses
+    // (menu.h), so the two paths can never fight over which one "owns" the pixels.
+    if (g_testLedReq) {
+      g_testLedReq = false;
+      if (g_testLedReqColorIdx < 0 || g_testLedReqColorIdx >= TEST_LED_COUNT) {
+        g_ledTestActive = false;  // release -> ledTick() resumes normal behavior
+      } else {
+        g_ledTestActive = true;
+        const TestLedColor &c = kTestLedColors[g_testLedReqColorIdx];
+        ledShow(pixel.Color(c.r * LED_BRIGHT, c.g * LED_BRIGHT, c.b * LED_BRIGHT));
+      }
+    }
+
+    // 1e) Diagnostics card -- TFT test pattern. Draws directly here (core 0, same
+    // rule as the screen preview above) and sets g_tftTestWebActive so menuTick()'s
+    // normal redraw logic backs off while a web-triggered pattern is showing (see the
+    // guard near the top of menuTick()).
+    if (g_testTftReq) {
+      g_testTftReq = false;
+      if (g_testTftReqPattern < 0) {
+        g_tftTestWebActive = false;
+        g_menuForceRedraw = true;  // repaint whatever the real state actually is
+      } else {
+        g_tftTestWebActive = true;
+        if (g_testTftReqPattern >= 0 && g_testTftReqPattern < TEST_TFT_COLOR_COUNT) {
+          g_testTftColorIdx = g_testTftReqPattern;
+          menuRenderTestTftColors();
+        } else if (g_testTftReqPattern == 10) {
+          menuRenderTestTftFont();
+        } else if (g_testTftReqPattern == 20) {
+          menuRenderTestTftGray();
+        }
+      }
+    }
+
     // 2) Tag poll every 500ms. Skipped entirely while the screen preview is active: the
     // preview promises "read-only, no NFC/octo/HTTP call is ever made while this is
     // active" (see menuPreviewDraw's comment), but the poll -- and everything a real
@@ -3247,8 +3727,9 @@ void pn5180Task(void *param) {
             // carries a foreign vendor's data, so callers can refuse to overwrite it.
             // Same three probes the normal poll path uses, so both paths answer
             // identically (they did not before: this one relied on the probe's ccState,
-            // which cannot tell a formatted-but-empty NDEF tag from one with content).
-            // NFC-V has no page reader here, so it still falls back to ccState.
+            // which cannot tell a formatted-but-empty NDEF tag from one with content --
+            // and NFC-V had no block reader here at all, so it kept that weaker
+            // ccState fallback long after the other two carriers got a real check).
             if (!g_nfcExtCacheHasExtended) {
               if (pr.type == PN5180_TAG_NFCA) {
                 bool isClassic = (pr.sak == 0x08 || pr.sak == 0x18 ||
@@ -3260,6 +3741,12 @@ void pn5180Task(void *param) {
                 }
                 g_pn5180->reset(); g_pn5180->setupRF();
               }
+              else if (pr.type == PN5180_TAG_NFCV) {
+                uint8_t uidRaw[8];
+                if (pn5180UidHexToBytes8Reversed(pr.uid, uidRaw))
+                  g_nfcExtCacheOccupancy = pn5180NfcvOccupancy(uidRaw);
+              }
+              // ccState fallback for anything neither branch covered (read failed).
               else if (pr.ccState == "virgin") g_nfcExtCacheOccupancy = "empty";
               else if (pr.ccState.length()) g_nfcExtCacheOccupancy = "foreign";
             }
@@ -3366,6 +3853,15 @@ void pn5180Task(void *param) {
               }
               g_pn5180->reset(); g_pn5180->setupRF();  // back to normal ISO15693 polling
             }
+            // NFC-V third carrier. No re-select needed (ISO15693 reads are UID-addressed,
+            // not session-bound like Crypto1/NFC-A), so this is two block reads and no RF
+            // mode switch. Runs inside the uidHex != g_lastUid branch, i.e. once per tag
+            // placement -- a tag left on the reader costs nothing further.
+            else if (!g_nfcExtCacheHasExtended && type == PN5180_TAG_NFCV) {
+              uint8_t uidRaw[8];
+              if (pn5180UidHexToBytes8Reversed(uidHex, uidRaw))
+                g_nfcExtCacheOccupancy = pn5180NfcvOccupancy(uidRaw);
+            }
             dbgLogf("NFC extended-read: uid=%s hasExtended=%d format=%s occupancy=%s",
                     uidHex.c_str(), g_nfcExtCacheHasExtended, g_nfcExtCacheWriteFormat.c_str(),
                     g_nfcExtCacheOccupancy.c_str());
@@ -3456,7 +3952,33 @@ void pn5180Task(void *param) {
       } else {
         target = g_blActive;
       }
-      if (target != blCurLevel) {
+
+      // Third idle stage: panel fully off. Checked against the same g_blActivity
+      // clock as dimming and the screensaver, just with a longer timeout, so the
+      // three stages cascade naturally (dim -> logo -> off) as idle time grows.
+      // Suppressed entirely during OTA / NFC debug via the branch above, which keeps
+      // touching the activity clock -- those two need a readable screen throughout.
+      bool wantOff = g_offEnabled && g_offTimeoutSec > 0 &&
+                     !(g_otaInProgress || g_nfcDebug) &&
+                     millis() - g_blActivity >= (unsigned long)g_offTimeoutSec * 1000UL;
+      if (wantOff) {
+        if (!g_tftAsleep) {
+          dbgLog("Display: off (idle timeout)");
+          displaySleep();
+          blCurLevel = 0;   // so the wake below always re-applies a real level
+        }
+      } else if (g_tftAsleep) {
+        // Waking costs ~140ms of blocking delay inside displayWake() (ST7789 sleep-out
+        // timing). That is fine here: it happens once per wake, not per tick, and this
+        // task's other duties (NFC poll, menu, backlight) tolerate a single skipped
+        // 10ms slot -- the scale runs in its own task and is unaffected.
+        displayWake(target);
+        blCurLevel = target;
+        g_menuForceRedraw = true;   // repaint rather than reveal the stale pre-sleep frame
+        dbgLog("Display: on (activity)");
+      }
+
+      if (!g_tftAsleep && target != blCurLevel) {
         blCurLevel = target;
         displaySetBacklight(target);
       }

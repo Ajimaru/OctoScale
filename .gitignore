@@ -10,3 +10,7 @@
 # Local secrets — never commit WiFi credentials or API keys
 secrets.h
 *.local.ini
+
+# Python bytecode (tools/)
+__pycache__/
+*.pyc

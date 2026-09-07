@@ -7,7 +7,7 @@
 // config comes from build_flags (platformio.ini, [s3_base]) — no setup here.
 
 #include <TFT_eSPI.h>
-#include "OctoLogo.h"  // RGB565 bitmap, 200x200 (converted from assets/octoscale_logo.jpeg)
+#include "OctoLogo.h"  // RGB565 bitmap, 200x200 (converted from assets/octoscale_logo.png)
 
 static TFT_eSPI g_tft = TFT_eSPI();
 static bool g_tftReady = false;
@@ -38,6 +38,37 @@ inline bool displayInit() {
   ledcWrite(BL_PWM_CH, 255);
 
   g_tftReady = true;
+  return true;
+}
+
+// Panel power-down (third idle stage, after dimming and the logo screensaver).
+// Backlight PWM to 0 AND the ST7789 into sleep: the backlight alone is what makes the
+// panel look off, but the controller keeps driving the pixel matrix and burning ~15mA
+// while doing it, so both go. Order matters in each direction -- kill the light before
+// the controller sleeps, and let the controller wake (it needs ~120ms per datasheet
+// before it accepts drawing again) before the light comes back, otherwise the wake
+// shows a frame of garbage or a half-initialised image.
+static bool g_tftAsleep = false;
+
+inline void displaySleep() {
+  if (!g_tftReady || g_tftAsleep) return;
+  displaySetBacklight(0);
+  g_tft.writecommand(0x28);   // DISPOFF
+  g_tft.writecommand(0x10);   // SLPIN
+  delay(20);                  // datasheet: no further commands for 5ms after SLPIN
+  g_tftAsleep = true;
+}
+
+// Wakes the panel. Returns true if it actually woke something (caller then needs to
+// repaint -- sleep loses nothing in RAM, but the menu redraws anyway on the state
+// change that woke us, and a forced repaint avoids showing a stale pre-sleep frame).
+inline bool displayWake(uint8_t level) {
+  if (!g_tftReady || !g_tftAsleep) return false;
+  g_tft.writecommand(0x11);   // SLPOUT
+  delay(120);                 // datasheet: 120ms before the next command after SLPOUT
+  g_tft.writecommand(0x29);   // DISPON
+  g_tftAsleep = false;
+  displaySetBacklight(level);
   return true;
 }
 
@@ -76,7 +107,7 @@ inline void displayLogo(int cx, int cy) {
 // halo around the octopus on a dark background. Instead, every pixel whose R/G/B
 // channels are all above a threshold (any faint near-white shade, not just pure white)
 // is replaced with bgColor before the line is pushed -- catches the compression
-// artifacts too. The actual logo colors (teal/dark navy, see assets/octoscale_logo.jpeg)
+// artifacts too. The actual logo colors (teal/dark navy, see assets/octoscale_logo.png)
 // are all well below the threshold on at least one channel, so the artwork itself is
 // never affected.
 inline void displayLogoThemed(int cx, int cy, uint16_t bgColor) {
@@ -101,6 +132,48 @@ inline void displayLogoThemed(int cx, int cy, uint16_t bgColor) {
     g_tft.pushImage(x0, y0 + row, LOGO_W, 1, lineBuf);
   }
 }
+
+// Half-size logo (nearest-neighbour, every other pixel/row) for the bouncing
+// screensaver -- at full 180x180 the logo covers most of a 240x320 panel, which leaves
+// no room to actually bounce. Same near-white -> bgColor keying as displayLogoThemed().
+static const int LOGO_SMALL_W = LOGO_W / 2;
+static const int LOGO_SMALL_H = LOGO_H / 2;
+
+// Pre-scaled, key-colour-applied copy of the logo, built once (see
+// displayLogoSmallInit()) and re-blitted from RAM every screensaver frame. The
+// original per-frame version re-walked and re-keyed all 8100 source pixels AND pushed
+// them to the panel as 90 separate one-row SPI transfers -- SPI's per-call overhead on
+// that many tiny transfers was the actual bottleneck (not the pixel math), and is what
+// made the animation look choppy. One cached buffer + one pushImage() call per frame
+// fixes both: no recompute, and a single wide transfer instead of ninety thin ones.
+// bgColor is baked in at init time -- fine here because the screensaver always uses
+// MENU_BG, and menuRenderScreensaver() re-inits on every entry, which also covers a
+// theme change (dark/light) made just before the screensaver kicks in.
+static uint16_t g_logoSmallCache[LOGO_SMALL_W * LOGO_SMALL_H];
+static bool     g_logoSmallCacheValid = false;
+static uint16_t g_logoSmallCacheBg = 0;
+
+inline void displayLogoSmallInit(uint16_t bgColor) {
+  static uint16_t src[LOGO_W];
+  const uint8_t R_MIN = 24, G_MIN = 48, B_MIN = 24;  // see displayLogoThemed()
+  for (int row = 0; row < LOGO_SMALL_H; row++) {
+    memcpy_P(src, &OctoLogo[(row * 2) * LOGO_W], LOGO_W * sizeof(uint16_t));
+    uint16_t *dstRow = &g_logoSmallCache[row * LOGO_SMALL_W];
+    for (int i = 0; i < LOGO_SMALL_W; i++) {
+      uint16_t px = src[i * 2];
+      uint8_t r = (px >> 11) & 0x1F, g = (px >> 5) & 0x3F, b = px & 0x1F;
+      dstRow[i] = (r >= R_MIN && g >= G_MIN && b >= B_MIN) ? bgColor : px;
+    }
+  }
+  g_logoSmallCacheBg = bgColor;
+  g_logoSmallCacheValid = true;
+}
+
+inline void displayLogoSmall(int x0, int y0) {
+  if (!g_tftReady || !g_logoSmallCacheValid) return;
+  g_tft.pushImage(x0, y0, LOGO_SMALL_W, LOGO_SMALL_H, g_logoSmallCache);
+}
+
 
 // Splash screen: white background (matches the logo's own background) + title + logo
 // + version. Layout top-to-bottom so nothing overlaps: title (0-30), logo (centered

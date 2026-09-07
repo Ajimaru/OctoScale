@@ -64,6 +64,19 @@ enum MenuScreen {
   MENU_SYSINFO,     // system info sub-screen
   MENU_TARED,       // brief "Tared" confirmation, then auto-back to MENU_FLOW
   MENU_SCREENSAVER, // logo shown after g_ssTimeoutSec idle (any input/state change exits)
+  // Hidden diagnostics ("test menu"): reached from MENU_DEVICE by holding PUSH+KO
+  // for 3s from the System info screen, left the same way (symmetric, see the guard near
+  // the top of menuTick()). Deliberately NOT reachable from any other screen -- this
+  // is a bring-up/QA tool, not a normal-operation feature, and confining the gesture
+  // to MENU_DEVICE keeps it from ever firing by accident mid-flow.
+  MENU_TEST,         // test menu list (cursor navigation, like MENU_DEVICE)
+  MENU_TEST_NFC,      // live tag-present + UID
+  MENU_TEST_SCALE,    // live weight
+  MENU_TEST_LED,       // cycles defined colors on BOTH WS2812 strands
+  MENU_TEST_BUZZER,   // plays a test tone on PUSH
+  MENU_TEST_TFT,       // 3 sub-pages: full-screen colors / font sample / grayscale ramp
+  MENU_TEST_BUTTON,   // guided step test: press PUSH, then KO
+  MENU_TEST_KNOB,      // guided step test: turn CW, then CCW
 };
 
 static MenuScreen g_menuScreen = MENU_FLOW;
@@ -78,6 +91,7 @@ static String g_menuLastWeightStr = "";   // last drawn weight string (skip redu
 static String g_menuLastNfcDebugStr = "";  // last drawn NFC-debug-screen content (skip redundant redraws)
 static uint32_t g_menuTaredUntil = 0;     // millis() when MENU_TARED auto-returns to MENU_FLOW
 static bool g_menuNfcWriteWasActive = false;  // tracks the NFC-write lock screen (see menuTick)
+static bool g_menuNfcDumpWasActive = false;   // same, for the /nfcdump lock screen
 static bool g_menuNfcResultShown = false;     // result screen (Tag written/failed) drawn once already
 static uint32_t g_menuNfcResultUntil = 0;     // millis() when the result screen auto-returns
 static bool g_menuNfcResultDismissed = false; // result window elapsed; don't re-show it for THIS write
@@ -85,7 +99,67 @@ static bool g_menuNfcResultDismissed = false; // result window elapsed; don't re
 // Device-menu entries (order = cursor index).
 static const int DEV_COUNT = 5;   // Tare / NFC debug / Buzzer / Theme / System info (KO = back)
 
+// --- Test menu state (see MENU_TEST* above) ---------------------------------
+static int g_testCursor = 0;         // cursor in the test menu list (MENU_TEST)
+static int g_testTftCursor = 0;      // 0=Colors,1=Font,2=Grayscale -- position in the TFT test's 3-item list
+static bool g_testTftInSub = false;  // true = one of the 3 TFT sub-pages is open
+static int g_testColorIdx = 0;       // cursor in the LED test's color palette
+static int g_testTftColorIdx = 0;    // cursor in the TFT test's full-screen color palette
+static int g_testButtonStep = 0;     // 0=wait for PUSH, 1=wait for KO, 2=OK shown
+static uint32_t g_testButtonOkUntil = 0;
+static int g_testKnobStep = 0;       // 0=wait for CW, 1=wait for CCW, 2=OK shown
+static uint32_t g_testKnobOkUntil = 0;
+static const int TEST_COUNT = 7;     // NFC / Scale / LED / Buzzer / TFT / Button / Knob
+
+// PUSH+KO held together this long (ms) enters/leaves the test menu from MENU_DEVICE.
+static const uint32_t TEST_GESTURE_HOLD_MS = 3000;
+static uint32_t g_testGestureHoldStart = 0;  // millis() when PUSH went down, 0 = not holding
+static bool     g_testGestureFired = false;  // debounces re-firing while PUSH stays held past the threshold
+// Armed when the gesture fires; disarmed once PUSH has been seen UP and has stayed up
+// past the settle window. Until then every push latch is discarded, because the user
+// is still holding the button from the gesture itself -- the eventual release latches
+// a fresh "pressed" that would otherwise act on the screen the gesture just switched
+// to (entering the test menu and immediately opening its first entry).
+// Two-stage on purpose: the timer alone is not enough (a hold longer than the window
+// outlives it), and "button is up" alone is not enough either (this button re-bounces
+// on release, see encoder.h's debounce comment).
+static bool     g_testGestureLockArmed = false;  // false = normal button handling
+static uint32_t g_testGestureLockSince = 0;      // millis() when PUSH was first seen up, 0 = still down
+// A PUSH seen in SYSINFO/test screens is held back until release, then replayed as a
+// real click only if it was too short to be the hold gesture (see the gesture block).
+static bool     g_testPushDeferred = false;
+
 // --- small drawing helpers -------------------------------------------------
+
+// User text (vendor/material/colour names) is free utf8mb4 on the SpoolManagerExtended
+// side -- no whitelist, no transliteration -- so any codepoint can reach the display.
+// OctoFontMid carries ASCII + Latin-1 (U+00A0-U+00FF); anything outside it has no glyph
+// and TFT_eSPI draws a white-outlined box. Fold those down to '?' so an exotic name
+// degrades legibly instead of turning into a row of boxes.
+//
+// Also does the truncation, because doing it on the caller's side with substring() cuts
+// by BYTE and would slice a two-byte sequence in half -- producing exactly the same box
+// this function exists to prevent. maxChars counts characters, not bytes.
+static String menuDisplayText(const String &in, int maxChars = 0) {
+  String out;
+  int chars = 0;
+  for (int i = 0; i < (int)in.length(); ) {
+    uint8_t c = (uint8_t)in[i];
+    int len = (c < 0x80) ? 1 : ((c & 0xE0) == 0xC0) ? 2 : ((c & 0xF0) == 0xE0) ? 3 : 4;
+    if (i + len > (int)in.length()) break;            // truncated sequence at the end
+    if (maxChars > 0 && chars >= maxChars) return out + ".";
+    if (len == 1) {
+      out += (char)c;
+    } else if (len == 2 && c >= 0xC2 && c <= 0xC3) {  // U+0080-U+00FF: in the font
+      out += (char)c; out += in[i + 1];
+    } else {
+      out += '?';                                     // outside Latin-1: no glyph
+    }
+    i += len;
+    chars++;
+  }
+  return out;
+}
 
 // Top title (smooth mid font, centered). No rule line.
 static void menuTitle(const char *t, uint16_t col = MENU_TITLE) {
@@ -337,6 +411,11 @@ static void menuCenterTick() {
       g_tft.setTextColor(MENU_DIM, MENU_BG);
       g_tft.setTextDatum(MC_DATUM);
       g_tft.drawString(menuTagShort(g_nfcProbe.type), w / 2, 156, 4);
+      // With a tag on the reader, KO re-opens the load/weigh menu for it (the flow
+      // does not reopen on its own once dismissed -- see FLOW_IDLE's input handler).
+      // Without this line that path is invisible: the screen offers no other clue that
+      // the spool under it can still be acted on.
+      menuHint("KO = spool menu   PUSH = device menu");
     }
   }
   g_tft.setTextDatum(TL_DATUM);
@@ -442,8 +521,11 @@ static void menuRenderAskAction() {
   g_tft.fillRect(0, 0, w, g_tft.height(), MENU_BG);
 
   // Spool name as the title (saves a separate name line -> room for the info card).
-  String nm = g_flowSpoolName.length() ? g_flowSpoolName : String("What to do?");
-  if (nm.length() > 20) nm = nm.substring(0, 18) + "..";  // '…' isn't in the VLW set
+  // menuDisplayText counts CHARACTERS: substring(0,18) cut by byte and would slice a
+  // two-byte sequence in half -- a spool literally named "Weiss..." with the sharp s
+  // is the common case here.
+  String nm = g_flowSpoolName.length() ? menuDisplayText(g_flowSpoolName, 20)
+                                       : String("What to do?");
   menuTitle(nm.c_str());
 
   // --- Spool info card (2x2): left vendor/material + 'remaining', right color tile
@@ -459,13 +541,13 @@ static void menuRenderAskAction() {
   // left: vendor (above) + material (below)
   g_tft.setTextDatum(TL_DATUM);
   g_tft.setTextColor(MENU_TITLE, MENU_RULE);
-  g_tft.drawString(g_flowVendor.length() ? g_flowVendor : String("-"), lx, row1, 2);
+  g_tft.drawString(g_flowVendor.length() ? menuDisplayText(g_flowVendor) : String("-"), lx, row1, 2);
   g_tft.setTextColor(MENU_DIM, MENU_RULE);
-  g_tft.drawString(g_flowMaterial.length() ? g_flowMaterial : String("-"), lx, row1 + 20, 2);
+  g_tft.drawString(g_flowMaterial.length() ? menuDisplayText(g_flowMaterial) : String("-"), lx, row1 + 20, 2);
 
   // right: color tile + color name (row-1 height), tile to the left of the name
   const int swW = 26, swH = 20;
-  String cn = g_flowColorName;
+  String cn = menuDisplayText(g_flowColorName);
   int cnW = cn.length() ? g_tft.textWidth(cn, 2) : 0;
   int swX = rx - cnW - (cn.length() ? 8 : 0) - swW;
   if (g_flowColor.length()) menuDrawColorSwatch(swX, row1, swW, swH);
@@ -539,6 +621,15 @@ static void menuRenderWeighConfirm() {
 static uint32_t menuStateHash() {
   uint32_t h = (uint32_t)g_flowState * 131 + (uint32_t)g_menuScreen * 977
              + (uint32_t)(g_menuCursor + 1) * 31 + (uint32_t)(g_deviceCursor + 1) * 17
+             // Test-menu cursors: without these a turn moves the cursor variable but
+             // the hash never changes, so nothing is ever repainted (looked exactly
+             // like "the test menu can't be navigated").
+             + (uint32_t)(g_testCursor + 1) * 149 + (uint32_t)(g_testTftCursor + 1) * 163
+             // g_testColorIdx / g_testTftColorIdx are deliberately NOT hashed: their
+             // screens repaint their own band directly on each detent, so hashing them
+             // would additionally trigger a full menuRedraw() -- drawing twice, which
+             // is exactly the flicker this split was meant to remove.
+             + (uint32_t)(g_testTftInSub ? 1 : 0) * 179
              + (uint32_t)(g_flowSpoolId + 2) * 7 + (uint32_t)(g_flowToolCount + 1) * 13
              + (uint32_t)g_octoCount * 101 + (uint32_t)(g_nfcDebug ? 1 : 0) * 3
              // status markers so the footer redraws when they change
@@ -575,7 +666,7 @@ static int menuSysRow(int y, const char *label, const char *val, uint16_t valCol
 
 static void menuRenderSysinfo() {
   g_tft.fillRect(0, 0, g_tft.width(), g_tft.height(), MENU_BG);
-  menuTitle("System");
+  menuTitle("System info");
   g_tft.setTextDatum(TL_DATUM);
   int y = 46;
   // Order: connectivity -> subsystems -> identity.
@@ -608,8 +699,246 @@ static void menuRenderSysinfo() {
     }
     y = menuSysRow(y, "Last reset", rrTxt, rrBad ? MENU_ERR : MENU_OK);
   }
-  menuHint("PUSH / KO = back");
+  // The test-menu gesture is only live on THIS screen, so its hint belongs in this
+  // screen's footer line, alongside the normal controls.
+  menuHint("PUSH/KO=back  Hold PUSH 3s=test");
 }
+
+// ============================================================================
+// --- Hidden diagnostics / test menu (see MENU_TEST* in the enum above) -----
+// Bring-up/QA tool: reached from MENU_DEVICE by holding PUSH+KO together for
+// TEST_GESTURE_HOLD_MS (see the guard in menuTick()), left the same way from ANY of
+// the seven screens below. Deliberately no single-button "back" shortcut anywhere in
+// here (see the gesture guard's comment for why) -- the guided Button/Knob tests use
+// PUSH and KO as their actual test input, so neither can double as an exit key.
+// ============================================================================
+
+static const char *menuTestItemName(int i) {
+  switch (i) {
+    case 0: return "NFC test";
+    case 1: return "Scale test";
+    case 2: return "LED test";
+    case 3: return "Buzzer test";
+    case 4: return "Screen test";
+    case 5: return "Button test";
+    case 6: return "Knob test";
+    default: return "?";
+  }
+}
+
+static void menuRenderTest() {
+  g_tft.fillRect(0, 0, g_tft.width(), g_tft.height(), MENU_BG);
+  menuTitle("Test menu");
+  static const char *items[TEST_COUNT];
+  for (int i = 0; i < TEST_COUNT; i++) items[i] = menuTestItemName(i);
+  menuDrawList(items, TEST_COUNT, g_testCursor, 40, 28, TEST_COUNT);
+  menuHint("PUSH=open  KO=back");
+}
+
+static void menuRenderTestNfc() {
+  g_tft.fillRect(0, 0, g_tft.width(), g_tft.height(), MENU_BG);
+  menuTitle("NFC test");
+  g_tft.setTextDatum(TL_DATUM);
+  int y = 60;
+  y = menuSysRow(y, "Reader", pn5180IsReady() ? "ready" : "not ready",
+                 pn5180IsReady() ? MENU_OK : MENU_ERR);
+  y = menuSysRow(y, "Tag", g_pn5180Present ? "present" : "none",
+                 g_pn5180Present ? MENU_OK : MENU_DIM);
+  y = menuSysRow(y, "UID", g_pn5180Present ? g_pn5180Uid.c_str() : "-", MENU_TITLE);
+  menuHint("PUSH/KO=back");
+}
+
+// Weight readout only -- the caller owns the surrounding frame. Clears just the band
+// the number occupies instead of the whole screen: a full fillRect + repaint on every
+// weight change (several per second) is what made this flicker.
+static void menuTestScaleValue() {
+  int w = g_tft.width(), midY = g_tft.height() / 2;
+  char buf[16];
+  if (g_scaleReady) snprintf(buf, sizeof(buf), "%.1f g", g_weight);
+  else snprintf(buf, sizeof(buf), "n/a");
+  g_tft.loadFont(OctoFontBig);
+  int bandH = g_tft.fontHeight() + 8;
+  g_tft.fillRect(0, midY - bandH / 2, w, bandH, MENU_BG);
+  g_tft.setTextDatum(MC_DATUM);
+  g_tft.setTextColor(g_scaleReady ? MENU_WEIGHT : MENU_ERR, MENU_BG);
+  g_tft.drawString(buf, w / 2, midY);
+  g_tft.unloadFont();
+  g_tft.setTextDatum(TL_DATUM);
+}
+
+static void menuRenderTestScale() {
+  g_tft.fillRect(0, 0, g_tft.width(), g_tft.height(), MENU_BG);
+  menuTitle("Scale test");
+  menuTestScaleValue();
+  menuHint("PUSH/KO=back");
+}
+
+// LED test palette. Applied to BOTH strands via ledShow() (main.cpp) -- see
+// g_ledTestActive, which tells ledTick() to leave the pixels alone while this screen
+// (or the web UI's equivalent) owns them directly.
+struct TestLedColor { const char *name; uint32_t r, g, b; };
+static const TestLedColor kTestLedColors[] = {
+  {"Red", 3, 0, 0}, {"Green", 0, 3, 0}, {"Blue", 0, 0, 3},
+  {"White", 2, 2, 2}, {"Off", 0, 0, 0},
+};
+static const int TEST_LED_COUNT = 5;
+
+// Colour name + the LED itself. Repaints only the text band, so stepping through the
+// palette doesn't flash the whole screen (same reason as the scale readout above).
+static void menuTestLedValue() {
+  int w = g_tft.width(), midY = g_tft.height() / 2;
+  const int bandH = 34;
+  g_tft.fillRect(0, midY - bandH / 2, w, bandH, MENU_BG);
+  g_tft.setTextDatum(MC_DATUM);
+  g_tft.setTextColor(MENU_TITLE, MENU_BG);
+  g_tft.drawString(kTestLedColors[g_testColorIdx].name, w / 2, midY, 4);
+  g_tft.setTextDatum(TL_DATUM);
+  const TestLedColor &c = kTestLedColors[g_testColorIdx];
+  ledShow(pixel.Color(c.r * LED_BRIGHT, c.g * LED_BRIGHT, c.b * LED_BRIGHT));
+}
+
+static void menuRenderTestLed() {
+  g_tft.fillRect(0, 0, g_tft.width(), g_tft.height(), MENU_BG);
+  menuTitle("LED test");
+  menuTestLedValue();
+  menuHint("Turn=color  PUSH/KO=back");
+}
+
+static void menuRenderTestBuzzer() {
+  g_tft.fillRect(0, 0, g_tft.width(), g_tft.height(), MENU_BG);
+  menuTitle("Buzzer test");
+  g_tft.setTextDatum(MC_DATUM);
+  g_tft.setTextColor(MENU_DIM, MENU_BG);
+  g_tft.drawString("PUSH to play tone", g_tft.width() / 2, g_tft.height() / 2, 2);
+  g_tft.setTextDatum(TL_DATUM);
+  menuHint("PUSH=play  KO=back");
+}
+
+static const char *kTestTftItems[] = {"Full-screen colors", "Font / text page", "Grayscale ramp"};
+static const int TEST_TFT_COUNT = 3;
+static const uint16_t kTestTftColors[] = {TFT_RED, TFT_GREEN, TFT_BLUE, TFT_WHITE, TFT_BLACK};
+static const char *kTestTftColorNames[] = {"Red", "Green", "Blue", "White", "Black"};
+static const int TEST_TFT_COLOR_COUNT = 5;
+
+static void menuRenderTestTftColors() {
+  g_tft.fillScreen(kTestTftColors[g_testTftColorIdx]);
+  // Label overlay in a fixed corner box so it stays readable regardless of which of
+  // the 5 fills (including black/white) is currently showing.
+  g_tft.fillRect(0, 0, 90, 20, TFT_BLACK);
+  g_tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  g_tft.setTextDatum(TL_DATUM);
+  g_tft.drawString(kTestTftColorNames[g_testTftColorIdx], 4, 4, 2);
+}
+
+static void menuRenderTestTftFont() {
+  g_tft.fillRect(0, 0, g_tft.width(), g_tft.height(), MENU_BG);
+  menuTitle("Font test");
+  g_tft.setTextDatum(TL_DATUM);
+  g_tft.setTextColor(MENU_ROW_FG, MENU_BG);
+  g_tft.loadFont(OctoFontMid);
+  g_tft.drawString("Mid: ABCabc 0-9", 10, 44);
+  // Latin-1 umlauts (\xC3\x84=A, \xC3\x96=O, \xC3\x9C=U with diaeresis; \xC3\xA4/\xC3\xB6/\xC3\xBC
+  // lowercase; \xC3\x9F=sharp s), UTF-8 encoded -- OctoFontMid carries these (see the
+  // menuDisplayText() comment above), this is exactly what a real spool name exercises.
+  g_tft.drawString(menuDisplayText(String("\xC3\x84\xC3\x96\xC3\x9C \xC3\xA4\xC3\xB6\xC3\xBC\xC3\x9F")), 10, 74);
+  g_tft.unloadFont();
+  // OctoFontBig only ever renders weights/UIDs (digits + a few symbols) -- it was
+  // deliberately NOT extended with Latin-1, so no umlaut test here, only digits.
+  g_tft.loadFont(OctoFontBig);
+  g_tft.drawString("Big: 0-9", 10, 108);
+  g_tft.unloadFont();
+  g_tft.setTextDatum(TL_DATUM);
+}
+
+static void menuRenderTestTftGray() {
+  g_tft.fillRect(0, 0, g_tft.width(), g_tft.height(), MENU_BG);
+  menuTitle("Grayscale");
+  int w = g_tft.width(), h = g_tft.height();
+  int steps = 8;
+  int barY = 40, barH = h - barY - 20;
+  int stepW = w / steps;
+  for (int i = 0; i < steps; i++) {
+    uint8_t v = (uint8_t)((255 * i) / (steps - 1));
+    uint16_t col = g_tft.color565(v, v, v);
+    g_tft.fillRect(i * stepW, barY, stepW, barH, col);
+  }
+}
+
+static void menuRenderTestTft() {
+  if (!g_testTftInSub) {
+    g_tft.fillRect(0, 0, g_tft.width(), g_tft.height(), MENU_BG);
+    menuTitle("Screen test");
+    menuDrawList(kTestTftItems, TEST_TFT_COUNT, g_testTftCursor, 60, 40, TEST_TFT_COUNT);
+    menuHint("PUSH=open  KO=back");
+    return;
+  }
+  // No menuHint() inside the sub-pages: it would sit on top of a full-screen color
+  // fill / the grayscale bars, or crowd the already-tight font sample.
+  switch (g_testTftCursor) {
+    case 0: menuRenderTestTftColors(); break;
+    case 1: menuRenderTestTftFont();   break;
+    case 2: menuRenderTestTftGray();   break;
+  }
+}
+
+// Prompt line only -- the step text is all that changes between the guided steps.
+static void menuTestButtonValue() {
+  int w = g_tft.width(), midY = g_tft.height() / 2;
+  const int bandH = 34;
+  g_tft.fillRect(0, midY - bandH / 2, w, bandH, MENU_BG);
+  g_tft.setTextDatum(MC_DATUM);
+  g_tft.setTextColor(g_testButtonStep == 2 ? MENU_OK : MENU_TITLE, MENU_BG);
+  g_tft.drawString(g_testButtonStep == 0 ? "Press PUSH"
+                   : g_testButtonStep == 1 ? "Press KO" : "OK",
+                   w / 2, midY, 4);
+  g_tft.setTextDatum(TL_DATUM);
+}
+
+static void menuRenderTestButton() {
+  g_tft.fillRect(0, 0, g_tft.width(), g_tft.height(), MENU_BG);
+  menuTitle("Button test");
+  menuTestButtonValue();
+  menuHint("Hold PUSH 3s=back");
+}
+
+static void menuTestKnobValue() {
+  int w = g_tft.width(), midY = g_tft.height() / 2;
+  const int bandH = 34;
+  g_tft.fillRect(0, midY - bandH / 2, w, bandH, MENU_BG);
+  g_tft.setTextDatum(MC_DATUM);
+  g_tft.setTextColor(g_testKnobStep == 2 ? MENU_OK : MENU_TITLE, MENU_BG);
+  g_tft.drawString(g_testKnobStep == 0 ? "Turn knob CW"
+                   : g_testKnobStep == 1 ? "Turn knob CCW" : "OK",
+                   w / 2, midY, 4);
+  g_tft.setTextDatum(TL_DATUM);
+}
+
+static void menuRenderTestKnob() {
+  g_tft.fillRect(0, 0, g_tft.width(), g_tft.height(), MENU_BG);
+  menuTitle("Knob test");
+  menuTestKnobValue();
+  menuHint("PUSH/KO=back");
+}
+
+// Live-redraw helpers for the two screens that show a value which changes on its own
+// (NFC/scale), independent of menuTick()'s global state hash -- called every tick while
+// their screen is active (see the end of menuTick()), same "redraw only if the shown
+// value actually changed" idea as g_menuLastWeightStr / g_menuLastNfcDebugStr.
+static String g_testNfcLastStr = "";
+static void menuTestNfcTick() {
+  String cur = String(g_pn5180Present ? "1" : "0") + g_pn5180Uid;
+  if (cur != g_testNfcLastStr) { g_testNfcLastStr = cur; menuRenderTestNfc(); }
+}
+static String g_testScaleLastStr = "";
+static void menuTestScaleTick() {
+  char buf[16];
+  if (g_scaleReady) snprintf(buf, sizeof(buf), "%.1f", g_weight);
+  else snprintf(buf, sizeof(buf), "n/a");
+  String cur = String(buf);
+  if (cur != g_testScaleLastStr) { g_testScaleLastStr = cur; menuTestScaleValue(); }
+}
+
+
 
 // Success screen after loading: "Loaded" + printer/tool, vendor/material, color.
 // (When weighing, g_flowTool<0 -> a plain "Saved" screen via menuMessage instead.)
@@ -642,10 +971,8 @@ static void menuRenderDone() {
   g_tft.drawString("Vendor", lx, y, 2);
   g_tft.drawString("Material", rx, y, 2);
   g_tft.setTextColor(MENU_TITLE, MENU_BG);
-  String vd = g_flowVendor.length() ? g_flowVendor : String("-");
-  if (vd.length() > 11) vd = vd.substring(0, 10) + ".";
-  String ma = g_flowMaterial.length() ? g_flowMaterial : String("-");
-  if (ma.length() > 11) ma = ma.substring(0, 10) + ".";
+  String vd = g_flowVendor.length() ? menuDisplayText(g_flowVendor, 11) : String("-");
+  String ma = g_flowMaterial.length() ? menuDisplayText(g_flowMaterial, 11) : String("-");
   g_tft.drawString(vd, lx, y + vy, 4);
   g_tft.drawString(ma, rx, y + vy, 4);
   y += rh;
@@ -659,8 +986,7 @@ static void menuRenderDone() {
   if (g_flowColorName.length()) {
     g_tft.setTextColor(MENU_TITLE, MENU_BG);
     g_tft.setTextDatum(ML_DATUM);
-    String cn = g_flowColorName;
-    if (cn.length() > 14) cn = cn.substring(0, 13) + ".";
+    String cn = menuDisplayText(g_flowColorName, 14);
     g_tft.drawString(cn, lx + swW + 10, y + vy + swH / 2, 4);
     g_tft.setTextDatum(TL_DATUM);
   }
@@ -675,9 +1001,162 @@ static void menuRenderDone() {
 // the fly so the octopus sits cleanly on a dark background too, no mismatched white
 // tile/border. Light theme: MENU_BG is already TFT_WHITE, so this is visually
 // identical to the previous fixed-white behavior.
+// --- Bouncing-logo screensaver (the DVD-player one) -------------------------
+// Half-size logo + "OctoScale" wordmark under it, drifting across the panel and
+// bouncing off the edges. Only the sprite's own rectangle is erased and repainted per
+// step -- a full fillScreen per frame would both flicker and be far too slow over SPI.
+static const int SS_SPRITE_W = LOGO_SMALL_W;              // 90
+static const int SS_WORD_H   = 18;                        // wordmark band under the logo
+// The wordmark is wider than the logo, so its band is cleared this much beyond the
+// sprite on each side (see ssDrawWordmark).
+static const int SS_WORD_MARGIN = 10;
+static const int SS_SPRITE_H = LOGO_SMALL_H + SS_WORD_H;  // 108
+// Movement is tuned around pn5180Task's fixed 10ms tick (see its vTaskDelay): the
+// frame interval MUST be a multiple of it, or frames land alternately on 40ms and 50ms
+// boundaries and the sprite visibly stutters even though nothing is actually slow.
+// Step stays at 1px -- the panel's finest granularity, so no movement can look
+// coarser than it has to. Speed is set purely by the interval: 30ms = 33 px/s, a
+// leisurely drift in keeping with the original DVD screensaver (100 px/s at every
+// task tick was correct but frantic). Must remain a multiple of pn5180Task's 10ms
+// tick, otherwise frames land on alternating boundaries and stutter regardless of how
+// little work each one does.
+// The panel is 320x240 (landscape, see displayInit's setRotation(1)), so the sprite's
+// travel range is 220 x 132 px -- both even, so a 1px or 2px step divides them evenly
+// and a true corner hit stays reachable.
+static const int SS_STEP     = 1;                         // px per frame, per axis
+static const uint32_t SS_FRAME_MS = 30;                   // 3 x the 10ms task tick
+
+static int  g_ssX = 0, g_ssY = 0;      // sprite top-left
+static int  g_ssDX = SS_STEP, g_ssDY = SS_STEP;
+static uint32_t g_ssLastFrame = 0;
+static uint8_t  g_ssHue = 0;           // cycles on every corner hit
+static bool g_ssCornerFlash = false;
+
+// The palette the wordmark cycles through when corners are hit. Kept off the logo
+// itself -- that is a fixed bitmap, only the text can change colour.
+static const int SS_COLOR_COUNT = 6;
+
+static uint16_t ssWordColor() {
+  static const uint16_t kCols[SS_COLOR_COUNT] = {
+    ACCENT_AMBER, ACCENT_CYAN, MENU_OK, MENU_ERR, 0xF81F /*magenta*/, 0xFFE0 /*yellow*/,
+  };
+  return kCols[g_ssHue % SS_COLOR_COUNT];
+}
+
+// Same six colours as the wordmark, as WS2812 RGB -- kept as a parallel table rather
+// than converting from RGB565, so the LED shows a clean saturated hue instead of the
+// panel's approximation of it. Scaled by LED_BRIGHT like every other status colour.
+static uint32_t ssLedColor() {
+  static const uint8_t kRgb[SS_COLOR_COUNT][3] = {
+    {3, 2, 0},  // amber
+    {0, 2, 3},  // cyan
+    {0, 3, 0},  // green
+    {3, 0, 0},  // red
+    {3, 0, 3},  // magenta
+    {3, 3, 0},  // yellow
+  };
+  const uint8_t *c = kRgb[g_ssHue % SS_COLOR_COUNT];
+  return pixel.Color(c[0] * LED_BRIGHT, c[1] * LED_BRIGHT, c[2] * LED_BRIGHT);
+}
+
+// Wordmark only. Text can't be blitted in slices like the cached logo can, so the
+// incremental path repaints this whole band -- at 90x18 that is still ~1/25th of a
+// full sprite blit.
+static void ssDrawWordmark() {
+  // Clear WIDER than the sprite: "OctoScale" in font 2 is ~99px, i.e. wider than the
+  // 90px logo it sits under, so it overhangs a few px on each side. Clearing only the
+  // sprite width left those overhanging parts (most visibly the leading "O") on the
+  // panel, smearing into a trail as the sprite moved. Clamped to the screen so the
+  // margin can't wrap at the edges.
+  int clrX = g_ssX - SS_WORD_MARGIN;
+  int clrW = SS_SPRITE_W + 2 * SS_WORD_MARGIN;
+  if (clrX < 0) { clrW += clrX; clrX = 0; }
+  if (clrX + clrW > g_tft.width()) clrW = g_tft.width() - clrX;
+  g_tft.fillRect(clrX, g_ssY + LOGO_SMALL_H, clrW, SS_WORD_H, MENU_BG);
+  g_tft.setTextDatum(MC_DATUM);
+  g_tft.setTextColor(g_ssCornerFlash ? ssWordColor() : MENU_DIM, MENU_BG);
+  g_tft.drawString("OctoScale", g_ssX + SS_SPRITE_W / 2,
+                   g_ssY + LOGO_SMALL_H + SS_WORD_H / 2, 2);
+  g_tft.setTextDatum(TL_DATUM);
+}
+
+static void ssDrawSprite() {
+  displayLogoSmall(g_ssX, g_ssY);
+  ssDrawWordmark();
+}
+
 static void menuRenderScreensaver() {
   g_tft.fillScreen(MENU_BG);
-  displayLogoThemed(g_tft.width() / 2, g_tft.height() / 2, MENU_BG);
+  // Rebuild the scaled-logo cache only if the background it was baked against no
+  // longer matches (a theme switch, or the very first run) -- the whole point of
+  // caching is to skip this on every ordinary re-entry.
+  if (!g_logoSmallCacheValid || g_logoSmallCacheBg != MENU_BG) displayLogoSmallInit(MENU_BG);
+  // Start from a spot that isn't a multiple of the step, so the very first run doesn't
+  // trivially land in a corner.
+  g_ssX = SS_WORD_MARGIN + (g_tft.width() - SS_SPRITE_W - 2 * SS_WORD_MARGIN) / 3;
+  g_ssY = (g_tft.height() - SS_SPRITE_H) / 3;
+  g_ssDX = SS_STEP; g_ssDY = SS_STEP;
+  g_ssCornerFlash = false;
+  g_ssLastFrame = 0;
+  ssDrawSprite();
+}
+
+// One animation step; called every menuTick while the screensaver is up.
+static void menuScreensaverTick() {
+  uint32_t now = millis();
+  if (now - g_ssLastFrame < SS_FRAME_MS) return;
+  // Advance the schedule by whole frames rather than resetting it to `now`: resetting
+  // lets every late frame permanently shift the cadence, which is the other half of
+  // the stutter. If we fell far behind (a blocking NFC read), resync instead of trying
+  // to catch up with a burst of frames.
+  g_ssLastFrame += SS_FRAME_MS;
+  if (now - g_ssLastFrame > SS_FRAME_MS * 4) g_ssLastFrame = now;
+
+  // Bounce on the WORDMARK's extent, not the logo's: the text is wider than the logo
+  // and would otherwise be clipped at the left/right edges. Keeping the same margin
+  // the clear uses means the widest part of the sprite is what touches the edge.
+  int maxX = g_tft.width()  - SS_SPRITE_W - SS_WORD_MARGIN;
+  int maxY = g_tft.height() - SS_SPRITE_H;
+  int oldX = g_ssX, oldY = g_ssY;
+
+  g_ssX += g_ssDX;
+  g_ssY += g_ssDY;
+
+  bool hitX = false, hitY = false;
+  if (g_ssX <= SS_WORD_MARGIN) { g_ssX = SS_WORD_MARGIN; g_ssDX = SS_STEP;  hitX = true; }
+  if (g_ssX >= maxX) { g_ssX = maxX; g_ssDX = -SS_STEP; hitX = true; }
+  if (g_ssY <= 0)    { g_ssY = 0;    g_ssDY = SS_STEP;  hitY = true; }
+  if (g_ssY >= maxY) { g_ssY = maxY; g_ssDY = -SS_STEP; hitY = true; }
+
+  // The whole point of the meme: both edges in the same frame. Celebrated silently --
+  // the wordmark changes colour and the status LED flashes the SAME colour for 2s.
+  // Deliberately no buzzer: the screensaver runs unattended, often for hours, and a
+  // corner hit could land in the middle of the night.
+  if (hitX && hitY) {
+    g_ssHue++;
+    g_ssCornerFlash = true;
+    ledFlash(ssLedColor(), 2000);
+    dbgLog("Screensaver: corner hit");
+  }
+
+  int dx = g_ssX - oldX, dy = g_ssY - oldY;
+  if (dx == 0 && dy == 0) return;
+
+  // Erase the strips the sprite vacated, then blit it whole at the new position.
+  // An earlier version redrew only the 1px leading edge to save SPI time; getting the
+  // erase strips to be exactly complementary to that on diagonal moves proved too
+  // error-prone (they kept clipping into the still-covered area, eating the logo away
+  // a sliver per frame). At 30ms/frame a full 90x90 blit is ~4.8ms of SPI -- well
+  // inside the budget -- so correctness wins over the micro-optimisation here.
+  if (dx != 0) {
+    int eraseX = (dx > 0) ? oldX : g_ssX + SS_SPRITE_W;
+    g_tft.fillRect(eraseX, oldY, SS_STEP, SS_SPRITE_H, MENU_BG);
+  }
+  if (dy != 0) {
+    int eraseY = (dy > 0) ? oldY : g_ssY + SS_SPRITE_H;
+    g_tft.fillRect(oldX, eraseY, SS_SPRITE_W, SS_STEP, MENU_BG);
+  }
+  ssDrawSprite();
 }
 
 static void menuRedraw() {
@@ -685,6 +1164,14 @@ static void menuRedraw() {
   if (g_menuScreen == MENU_SYSINFO)     { menuRenderSysinfo();     return; }
   if (g_menuScreen == MENU_TARED)       { menuMessage("Tared", MENU_OK); return; }
   if (g_menuScreen == MENU_SCREENSAVER) { menuRenderScreensaver(); return; }
+  if (g_menuScreen == MENU_TEST)        { menuRenderTest();        return; }
+  if (g_menuScreen == MENU_TEST_NFC)    { menuRenderTestNfc();     return; }
+  if (g_menuScreen == MENU_TEST_SCALE)  { menuRenderTestScale();   return; }
+  if (g_menuScreen == MENU_TEST_LED)    { menuRenderTestLed();     return; }
+  if (g_menuScreen == MENU_TEST_BUZZER) { menuRenderTestBuzzer();  return; }
+  if (g_menuScreen == MENU_TEST_TFT)    { menuRenderTestTft();     return; }
+  if (g_menuScreen == MENU_TEST_BUTTON) { menuRenderTestButton();  return; }
+  if (g_menuScreen == MENU_TEST_KNOB)   { menuRenderTestKnob();    return; }
   switch (g_flowState) {
     case FLOW_IDLE:          menuRenderIdle(); break;
     case FLOW_DB_CHECK:      menuMessage("Checking DB...", MENU_TITLE); break;
@@ -692,7 +1179,12 @@ static void menuRedraw() {
     // and it says what it is instead of "Unknown". Blank/unassigned tags keep the amber
     // warning, since those genuinely are "this should have been one of ours".
     case FLOW_UNKNOWN:
-      if (g_flowForeignTag) menuMessage("Vendor tag", MENU_TITLE, g_flowMsg.c_str());
+      // "Unreadable tag", not "Vendor tag": occupancy=="foreign" only means "carries
+      // data no format here could parse", which covers a manufacturer's tag AND our own
+      // half-written one (an aborted OpenPrintTag write used to leave exactly that).
+      // Naming a cause the firmware cannot actually determine sent users looking for a
+      // vendor that isn't involved.
+      if (g_flowForeignTag) menuMessage("Unreadable tag", MENU_TITLE, g_flowMsg.c_str());
       else                  menuMessage("Unknown spool", MENU_WARN, g_flowMsg.c_str());
       break;
     case FLOW_ASK_ACTION:    menuRenderAskAction(); break;
@@ -1164,6 +1656,38 @@ static void menuRenderOta() {
   g_tft.setTextDatum(TL_DATUM);
 }
 
+// NFC dump lock screen: shown while an /nfcdump raw read is in flight. Deliberately
+// the same look as menuRenderNfcWrite() below -- same glyph, same geometry, same theme
+// colors -- because from the user's side it is the same situation: the reader is busy
+// for several seconds and the tag must stay put. Only the wording differs, and the
+// subtitle names the carrier so a long Mifare dump doesn't look like a hung NTAG one.
+//
+// Static, not animated, for the same reason as the write screen: menuTick() runs in
+// pn5180Task -- the very task that then blocks for the whole dump -- so it cannot get
+// back around to redraw anything until the dump has already finished. A millis()-driven
+// animation would freeze on whatever frame was current at draw time, implying liveness
+// that isn't there. The blinking LED carries the "still working" signal instead.
+static void menuRenderNfcDump() {
+  int w = g_tft.width(), h = g_tft.height();
+  g_tft.fillRect(0, 0, w, h, MENU_BG);
+
+  int cx = w / 2, cy = h / 2 - 46;
+  g_tft.fillCircle(cx, cy, 7, MENU_WEIGHT);
+  for (int i = 0; i < 2; i++) {
+    int r = 20 + i * 18;
+    g_tft.drawArc(cx, cy, r, r - 4, 300, 360, MENU_WEIGHT, MENU_BG, true);
+  }
+
+  g_tft.loadFont(OctoFontMid);
+  g_tft.setTextColor(MENU_TITLE, MENU_BG);
+  g_tft.setTextDatum(MC_DATUM);
+  g_tft.drawString("Dumping NFC tag", cx, h / 2 + 24);
+  g_tft.unloadFont();
+  g_tft.setTextColor(MENU_DIM, MENU_BG);
+  g_tft.drawString("Do not remove tag", cx, h / 2 + 58, 4);
+  g_tft.setTextDatum(TL_DATUM);
+}
+
 // NFC write lock screen: shown while an /nfcwriteid, /nfcwritespool, or /nfcerase
 // request is in flight (g_nfcWriteReq or g_nfcWritePending, set by pn5180Task itself
 // -> same core, safe to read directly, no volatile-cross-core dance needed). Same
@@ -1233,6 +1757,14 @@ static const char *menuScreenName(MenuScreen s) {
     case MENU_SYSINFO:     return "SYSINFO";
     case MENU_TARED:       return "TARED";
     case MENU_SCREENSAVER: return "SCREENSAVER";
+    case MENU_TEST:        return "TEST";
+    case MENU_TEST_NFC:    return "TEST_NFC";
+    case MENU_TEST_SCALE:  return "TEST_SCALE";
+    case MENU_TEST_LED:    return "TEST_LED";
+    case MENU_TEST_BUZZER: return "TEST_BUZZER";
+    case MENU_TEST_TFT:    return "TEST_TFT";
+    case MENU_TEST_BUTTON: return "TEST_BUTTON";
+    case MENU_TEST_KNOB:   return "TEST_KNOB";
     default:                return "?";
   }
 }
@@ -1273,6 +1805,27 @@ inline void menuTick(long delta, bool push, bool start) {
   // after the result has been latched: Pending may still be set while the result is
   // already waiting to be shown, and re-entering here would re-arm the flags below
   // and swallow the result screen.
+  // Dump lock screen. Checked BEFORE the write gate: the two flags are mutually
+  // exclusive by the endpoint guards (/nfcdump refuses while a write is pending and
+  // vice versa), so the order only matters if that ever changes -- and a dump is the
+  // shorter, more interruptible of the two, so it should not be masked.
+  // No result screen: a dump produces bytes for an HTTP caller, not a user-facing
+  // outcome, so the screen simply falls back to the flow view when the dump ends.
+  if (g_nfcDumpReq || g_nfcDumpPending) {
+    menuRenderNfcDump();
+    g_menuNfcDumpWasActive = true;
+    return;
+  }
+  // Dump just finished -> force a full redraw. Without this the lock screen stays on
+  // the TFT until something else happens to change the state hash (an encoder turn, a
+  // button press): the flow state is typically identical before and after a dump, so
+  // menuRedraw()'s change detection sees nothing to do and never paints over it. Same
+  // released-latch pattern as g_menuNfcWriteWasActive below -- a dump has no result
+  // screen, so it goes straight back to whatever was showing before.
+  if (g_menuNfcDumpWasActive) {
+    g_menuNfcDumpWasActive = false;
+    g_menuForceRedraw = true;
+  }
   if ((g_nfcWriteReq || g_nfcWritePending) && !g_nfcMenuResultPending &&
       !g_menuNfcResultDismissed) {
     menuRenderNfcWrite();
@@ -1318,6 +1871,20 @@ inline void menuTick(long delta, bool push, bool start) {
     g_menuForceRedraw = true;
   }
 
+  // Diagnostics card's TFT test pattern (web UI Debug tab): the poll task already
+  // drew the requested pattern directly (see main.cpp's g_testTftReq handling) --
+  // this guard just stops the normal redraw logic below from immediately painting
+  // over it. Locally abortable at the device (PUSH or KO), same as the screen
+  // preview below, so a forgotten web-triggered pattern doesn't strand the TFT.
+  if (g_tftTestWebActive) {
+    if (push || start) {
+      g_tftTestWebActive = false;
+      g_menuForceRedraw = true;
+      dbgLog("Diagnostics: web TFT test stopped locally");
+    }
+    return;
+  }
+
   // Screen preview mode (web UI System tab): below OTA/NFC-write-lock in priority (a
   // real write/update in flight still wins -- see menuPreviewSetActive's comment on
   // why the preview itself never touches g_flowState/g_menuScreen), above everything
@@ -1335,8 +1902,105 @@ inline void menuTick(long delta, bool push, bool start) {
     return;
   }
 
+  // --- Test menu access/exit gesture: hold PUSH alone for TEST_GESTURE_HOLD_MS ----
+  // Enter: only from MENU_SYSINFO. Exit: from ANY MENU_TEST* screen, back to
+  // MENU_SYSINFO, same gesture, symmetric. Originally PUSH+KO held together, but that
+  // does not work reliably on the physical hardware (the two buttons are awkward to
+  // press at the exact same instant) -- PUSH alone, gated on being in MENU_SYSINFO
+  // specifically, keeps the same "won't fire by accident" property (SYSINFO is itself
+  // a deliberate two-step navigation from idle: PUSH -> DEVICE -> PUSH -> SYSINFO) with
+  // an actually reliable gesture. Uses encoderPushDown() (live pin level), NOT the
+  // push one-shot latch -- SYSINFO's own normal handling (a plain PUSH/KO click exits
+  // to MENU_DEVICE) still works exactly as before as long as PUSH is released before
+  // the hold time is up; only a held PUSH is intercepted here.
+  {
+    bool inSysinfo = (g_menuScreen == MENU_SYSINFO);
+    bool inTest = (g_menuScreen == MENU_TEST || g_menuScreen == MENU_TEST_NFC ||
+                   g_menuScreen == MENU_TEST_SCALE || g_menuScreen == MENU_TEST_LED ||
+                   g_menuScreen == MENU_TEST_BUZZER || g_menuScreen == MENU_TEST_TFT ||
+                   g_menuScreen == MENU_TEST_BUTTON || g_menuScreen == MENU_TEST_KNOB);
+    bool pushHeld = encoderPushDown();
+
+    if ((inSysinfo || inTest) && pushHeld) {
+      if (g_testGestureHoldStart == 0) g_testGestureHoldStart = millis();
+      else if (!g_testGestureFired &&
+               millis() - g_testGestureHoldStart >= TEST_GESTURE_HOLD_MS) {
+        g_testGestureFired = true;
+        if (inSysinfo) {
+          g_menuScreen = MENU_TEST; g_testCursor = 0;
+        } else if (g_menuScreen == MENU_TEST) {
+          g_menuScreen = MENU_SYSINFO;          // the list itself: hold = leave the test menu
+        } else {
+          // Inside a sub-test: the hold means "back to the list", not "leave the test
+          // menu" -- Button/Knob need it because they use PUSH/KO as test input and so
+          // have no short-press way back.
+          if (g_menuScreen == MENU_TEST_LED) g_ledTestActive = false;  // release LED override
+          g_menuScreen = MENU_TEST;
+        }
+        g_menuForceRedraw = true;
+        buzzerOk();
+        dbgLogf("Menu: test-menu gesture -> %s", menuScreenName(g_menuScreen));
+        // Arm the release lock (see g_testGestureLockArmed): from here until PUSH is
+        // released and settled, every push latch is discarded.
+        g_testGestureLockArmed = true;
+        g_testGestureLockSince = 0;
+      }
+    } else {
+      g_testGestureHoldStart = 0;
+      g_testGestureFired = false;
+    }
+    // Snapshot BEFORE the else-branch above can clear it: on the very tick the button
+    // comes up, g_testGestureFired is reset, so testing it below would report "no
+    // gesture" for exactly the release that ended one.
+    bool firedThisPress = g_testGestureFired || g_testGestureLockArmed;
+    // A press cannot be classified at the moment it arrives: click and hold look
+    // identical on the way down, and the ISR latches on the FALLING edge, so `push` is
+    // already true on the first tick either way. Acting on it immediately made a hold
+    // leave SYSINFO before the gesture could fire; suppressing it while the button is
+    // down lost real clicks (the caller consumes the latch before menuTick even runs,
+    // see main.cpp's menuTick call). So the press is DEFERRED here and replayed on
+    // release, when its duration is known: shorter than the threshold -> a real click,
+    // handed to the normal handling below; longer -> the gesture already fired, drop it.
+    if ((inSysinfo || inTest) && push) { g_testPushDeferred = true; push = false; }
+    if (g_testPushDeferred && !pushHeld) {
+      g_testPushDeferred = false;
+      // Held past the threshold -> the gesture consumed this press, don't replay it.
+      if (!firedThisPress) push = true;
+    }
+    // A press deferred in one of these screens must not leak out if the screen changes
+    // underneath it (gesture switching SYSINFO <-> TEST) -- the flag is cleared on
+    // release above in every case, so it can never outlive the press that set it.
+  }
+
+  // Post-gesture release lock. The gesture fires the instant the threshold is reached,
+  // but the user is typically still pressing for another second or so. That later
+  // release latches a fresh "pressed" which would land on the screen the gesture just
+  // switched TO and act there (entering the test menu and immediately opening its
+  // first entry, NFC test -- measured at ~1.5s after the gesture, far too late to be
+  // contact bounce). So this discards push latches until the button is confirmed up
+  // and settled (this one re-bounces on release, see encoder.h's debounce comment).
+  // Deliberately does NOT return: only the button event is suppressed, the rest of the
+  // tick still runs so the screen the gesture switched to is drawn immediately rather
+  // than after the user finally lets go.
+  if (g_testGestureLockArmed) {
+    if (encoderPushDown()) {
+      g_testGestureLockSince = 0;              // still held -> settle window hasn't begun
+    } else if (g_testGestureLockSince == 0) {
+      g_testGestureLockSince = millis();       // just came up -> start settling
+    } else if (millis() - g_testGestureLockSince >= 400) {
+      g_testGestureLockArmed = false;          // up and quiet -> normal handling resumes
+    }
+    if (g_testGestureLockArmed) {
+      encoderPushPressed();   // drop the hold's own release (and its bounce)
+      push = false;
+    }
+  }
+
   MenuScreen screenBefore = g_menuScreen;
-  int cursorBefore = (g_menuScreen == MENU_DEVICE) ? g_deviceCursor : g_menuCursor;
+  int cursorBefore = (g_menuScreen == MENU_DEVICE) ? g_deviceCursor
+                    : (g_menuScreen == MENU_TEST)   ? g_testCursor
+                    : (g_menuScreen == MENU_TEST_TFT && !g_testTftInSub) ? g_testTftCursor
+                    : g_menuCursor;
   // What caused this tick's change, for the debug log (best-effort: multiple things can
   // be true, e.g. a state change AND a push in the same tick -> the log line just
   // reflects what menuTick was given, not a strict single cause).
@@ -1356,6 +2020,11 @@ inline void menuTick(long delta, bool push, bool start) {
       g_menuForceRedraw = true;
       if (steps || push || start) displayTouch();
       menuRedraw();
+    } else if (!g_tftAsleep) {
+      // Still idle -> advance the bouncing logo one step. Skipped while the panel is
+      // asleep (third idle stage): the animation would push ~5ms of SPI per frame at
+      // a display that is powered down and showing nothing.
+      menuScreensaverTick();
     }
     return;  // no further input handling while the screensaver is up (entering or staying)
   }
@@ -1394,15 +2063,104 @@ inline void menuTick(long delta, bool push, bool start) {
           if (g_buzEnabled) buzzerOk();
           dbgLogf("Menu: Buzzer -> %s", g_buzEnabled ? "ON" : "OFF");
           break;
-        case 3: g_menuDark = !g_menuDark; menuApplyTheme(); dbgLogf("Menu: Theme -> %s", g_menuDark ? "Dark" : "Light"); break;
-        case 4: g_menuScreen = MENU_SYSINFO; break;      // System info
+        case 3:  // theme toggle + NVS, same persist-on-change pattern as the buzzer above
+          g_menuDark = !g_menuDark;
+          menuApplyTheme();
+          { Preferences p; p.begin("octoscale", false); p.putBool("menuDark", g_menuDark); p.end(); }
+          dbgLogf("Menu: Theme -> %s", g_menuDark ? "Dark" : "Light");
+          break;
+        case 4: g_menuScreen = MENU_SYSINFO; g_menuForceRedraw = true; break;  // System info
       }
-      g_menuForceRedraw = true;
+      // Deliberately NOT a blanket g_menuForceRedraw here. The three toggles above
+      // (NFC debug / Buzzer / Theme) only change one row's label, and forcing a full
+      // redraw for them disabled the cursor-only path below -- every toggle repainted
+      // the whole screen, which is the flicker. The hash covers all three, so the
+      // list gets redrawn either way; only a screen CHANGE needs the full repaint.
+      // The theme toggle is the exception: it recolors everything, so it forces one.
+      if (g_deviceCursor == 3) g_menuForceRedraw = true;
     }
     if (start) { g_menuScreen = MENU_FLOW; g_menuForceRedraw = true; }  // KO = back
   }
   else if (g_menuScreen == MENU_SYSINFO) {
     if (push || start) { g_menuScreen = MENU_DEVICE; g_menuForceRedraw = true; }
+  }
+  // ---- Test menu screens. NO single-button "back to DEVICE" shortcut anywhere below
+  // (see the gesture guard's comment) -- PUSH inside a sub-screen returns to the TEST
+  // LIST only, matching the requirement that the whole test menu is left exclusively
+  // via the hold gesture, consistently across all seven screens (including the ones
+  // where PUSH/KO aren't needed as test input, like NFC/Scale/Buzzer).
+  else if (g_menuScreen == MENU_TEST) {
+    if (steps) menuMoveCursor(g_testCursor, TEST_COUNT, steps);
+    if (push) {
+      switch (g_testCursor) {
+        case 0: g_menuScreen = MENU_TEST_NFC; g_testNfcLastStr = ""; break;
+        case 1: g_menuScreen = MENU_TEST_SCALE; g_testScaleLastStr = ""; break;
+        case 2: g_menuScreen = MENU_TEST_LED; g_testColorIdx = 0; g_ledTestActive = true; break;
+        case 3: g_menuScreen = MENU_TEST_BUZZER; break;
+        case 4: g_menuScreen = MENU_TEST_TFT; g_testTftCursor = 0; g_testTftInSub = false; break;
+        case 5: g_menuScreen = MENU_TEST_BUTTON; g_testButtonStep = 0; break;
+        case 6: g_menuScreen = MENU_TEST_KNOB; g_testKnobStep = 0; break;
+      }
+      g_menuForceRedraw = true;
+    }
+    if (start) { g_menuScreen = MENU_SYSINFO; g_menuForceRedraw = true; }  // KO = leave the test menu
+  }
+  else if (g_menuScreen == MENU_TEST_NFC) {
+    if (push || start) { g_menuScreen = MENU_TEST; g_menuForceRedraw = true; }
+  }
+  else if (g_menuScreen == MENU_TEST_SCALE) {
+    if (push || start) { g_menuScreen = MENU_TEST; g_menuForceRedraw = true; }
+  }
+  else if (g_menuScreen == MENU_TEST_LED) {
+    if (steps) { menuMoveCursor(g_testColorIdx, TEST_LED_COUNT, steps); menuTestLedValue(); }
+    if (push || start) {
+      g_ledTestActive = false;  // release the LED override BEFORE leaving the screen
+      g_menuScreen = MENU_TEST; g_menuForceRedraw = true;
+    }
+  }
+  else if (g_menuScreen == MENU_TEST_BUZZER) {
+    // KO is the "back" key here (not PUSH) because PUSH is the test action itself.
+    // No collision with the hold gesture: KO is not part of it, and a short PUSH is
+    // released long before the threshold, so the guard above lets it through.
+    if (push) buzzerTest();
+    if (start) { g_menuScreen = MENU_TEST; g_menuForceRedraw = true; }
+  }
+  else if (g_menuScreen == MENU_TEST_TFT) {
+    if (!g_testTftInSub) {
+      if (steps) menuMoveCursor(g_testTftCursor, TEST_TFT_COUNT, steps);
+      if (push) { g_testTftInSub = true; g_menuForceRedraw = true; }
+      if (start) { g_menuScreen = MENU_TEST; g_menuForceRedraw = true; }  // KO on the 3-item list = back to test list
+    } else {
+      if (g_testTftCursor == 0 && steps) {
+        menuMoveCursor(g_testTftColorIdx, TEST_TFT_COLOR_COUNT, steps);
+        menuRenderTestTftColors();   // full-screen fill IS the content here
+      }
+      if (push || start) { g_testTftInSub = false; g_menuForceRedraw = true; }  // back to the 3-item list
+    }
+  }
+  else if (g_menuScreen == MENU_TEST_BUTTON) {
+    if (g_testButtonStep == 0 && push) {
+      g_testButtonStep = 1; menuTestButtonValue();
+    } else if (g_testButtonStep == 1 && start) {
+      g_testButtonStep = 2; g_testButtonOkUntil = millis() + 1500; menuTestButtonValue();
+    } else if (g_testButtonStep == 2 && (long)(millis() - g_testButtonOkUntil) >= 0) {
+      g_testButtonStep = 0; menuTestButtonValue();  // loop: ready to test again
+    }
+  }
+  else if (g_menuScreen == MENU_TEST_KNOB) {
+    // Both buttons exit: this test only exercises the encoder's rotation, so neither
+    // PUSH nor KO is needed as test input. The Button test below is the one exception
+    // with no short-press exit -- it uses both buttons, so only the hold gets out.
+    if (push || start) { g_menuScreen = MENU_TEST; g_menuForceRedraw = true; }
+    // steps is the signed detent count from menuTakeSteps() above, already consumed
+    // for this tick -- used directly for CW/CCW detection, not for list navigation.
+    else if (g_testKnobStep == 0 && steps > 0) {
+      g_testKnobStep = 1; menuTestKnobValue();
+    } else if (g_testKnobStep == 1 && steps < 0) {
+      g_testKnobStep = 2; g_testKnobOkUntil = millis() + 1500; menuTestKnobValue();
+    } else if (g_testKnobStep == 2 && (long)(millis() - g_testKnobOkUntil) >= 0) {
+      g_testKnobStep = 0; menuTestKnobValue();  // loop: ready to test again
+    }
   }
   else if (g_menuScreen == MENU_TARED) {
     if (push || start || (long)(millis() - g_menuTaredUntil) >= 0) {
@@ -1412,7 +2170,23 @@ inline void menuTick(long delta, bool push, bool start) {
   else {  // MENU_FLOW — per g_flowState
     switch (g_flowState) {
       case FLOW_IDLE:
-        if (push || start) { g_menuScreen = MENU_DEVICE; g_deviceCursor = 0; g_menuForceRedraw = true; }
+        // A tag that is still on the reader stays "handled" after the user backs out
+        // (see flowReset), so the flow will NOT reopen by itself -- that is what stops
+        // the menu from reappearing every ~1.5 s and freezing the weight readout. But
+        // it also means backing out was a one-way door: without lifting the spool there
+        // was no way back to "Load into printer" / "Save weight". KO re-arms the
+        // trigger for exactly the tag that is lying there, so the user can weigh first
+        // (live readout) and then act on the same spool. KO carries it because "back"
+        // has no meaning on the main screen -- it is the free button here -- while
+        // PUSH keeps its usual "into the device menu" role.
+        // Only clears the latch: the poll task does the actual (blocking) lookup on
+        // its next tick, so nothing blocks here.
+        if (start && g_pn5180Present && g_pn5180Uid.length()) {
+          g_lastUid = "";
+          g_menuForceRedraw = true;
+        } else if (push || start) {
+          g_menuScreen = MENU_DEVICE; g_deviceCursor = 0; g_menuForceRedraw = true;
+        }
         break;
       case FLOW_ASK_ACTION:
         if (steps) menuMoveCursor(g_menuCursor, 2, steps);
@@ -1426,7 +2200,9 @@ inline void menuTick(long delta, bool push, bool start) {
           }
           g_menuForceRedraw = true;
         }
-        if (start) { flowReset(); g_menuForceRedraw = true; }
+        // false: the tag is still on the reader -- see flowReset(). Re-arming here
+        // would reopen this very menu ~1.5 s later and block the weight readout.
+        if (start) { flowReset(false); g_menuForceRedraw = true; }
         break;
       case FLOW_ASK_PRINTER:
         if (steps) menuMoveCursor(g_menuCursor, g_octoCount, steps);
@@ -1440,12 +2216,12 @@ inline void menuTick(long delta, bool push, bool start) {
         break;
       case FLOW_WEIGH_CONFIRM:
         if (push) g_flowMenuReq = FMA_WEIGH_SAVE;
-        if (start) { flowReset(); g_menuForceRedraw = true; }
+        if (start) { flowReset(false); g_menuForceRedraw = true; }
         break;
       case FLOW_UNKNOWN:
       case FLOW_DONE:
       case FLOW_ERROR:
-        if (push || start) { flowReset(); g_menuForceRedraw = true; }
+        if (push || start) { flowReset(false); g_menuForceRedraw = true; }
         break;
       default: break;  // DB_CHECK/LOADING/WEIGHING: no input (active states)
     }
@@ -1457,10 +2233,15 @@ inline void menuTick(long delta, bool push, bool start) {
   if (g_menuScreen != screenBefore) {
     dbgLogf("Menu: %s -> %s (%s)", menuScreenName(screenBefore), menuScreenName(g_menuScreen), cause);
   } else {
-    int cursorAfter = (g_menuScreen == MENU_DEVICE) ? g_deviceCursor : g_menuCursor;
+    int cursorAfter = (g_menuScreen == MENU_DEVICE) ? g_deviceCursor
+                     : (g_menuScreen == MENU_TEST)   ? g_testCursor
+                     : (g_menuScreen == MENU_TEST_TFT && !g_testTftInSub) ? g_testTftCursor
+                     : g_menuCursor;
     if (cursorAfter != cursorBefore) {
       if (g_menuScreen == MENU_DEVICE)
         dbgLogf("Menu: DEVICE cursor -> %s", menuDeviceItemName(cursorAfter));
+      else if (g_menuScreen == MENU_TEST)
+        dbgLogf("Menu: TEST cursor -> %s", menuTestItemName(cursorAfter));
       else
         dbgLogf("Menu: %s cursor %d -> %d", menuScreenName(g_menuScreen), cursorBefore, cursorAfter);
     }
@@ -1475,7 +2256,11 @@ inline void menuTick(long delta, bool push, bool start) {
     // the title/card/hint too. That full clear-then-repaint on every single detent
     // was the visible flicker while turning the encoder through a list.
     bool cursorOnly = !g_menuForceRedraw && g_menuScreen == screenBefore;
-    if (cursorOnly && g_menuScreen == MENU_DEVICE && g_deviceCursor != cursorBefore) {
+    // No `cursor != cursorBefore` requirement for DEVICE: this path also has to cover
+    // the in-place toggles (NFC debug / Buzzer), where the cursor stays put but the
+    // row's label changes. The enclosing `if` only runs when the hash changed at all,
+    // so this cannot repaint on nothing.
+    if (cursorOnly && g_menuScreen == MENU_DEVICE) {
       static String items[DEV_COUNT];
       static const char *ip[DEV_COUNT];
       items[0] = "Tare";
@@ -1485,6 +2270,15 @@ inline void menuTick(long delta, bool push, bool start) {
       items[4] = "System info";
       for (int i = 0; i < DEV_COUNT; i++) ip[i] = items[i].c_str();
       menuDrawList(ip, DEV_COUNT, g_deviceCursor, 44, 34, DEV_COUNT);
+    } else if (cursorOnly && g_menuScreen == MENU_TEST && g_testCursor != cursorBefore) {
+      static const char *items[TEST_COUNT];
+      for (int i = 0; i < TEST_COUNT; i++) items[i] = menuTestItemName(i);
+      menuDrawList(items, TEST_COUNT, g_testCursor, 40, 28, TEST_COUNT);
+    } else if (cursorOnly && g_menuScreen == MENU_TEST_TFT && !g_testTftInSub
+               && g_testTftCursor != cursorBefore) {
+      // Same reason as the lists above: repainting the whole screen per detent is a
+      // visible flicker, and only the selection bar actually moves.
+      menuDrawList(kTestTftItems, TEST_TFT_COUNT, g_testTftCursor, 60, 40, TEST_TFT_COUNT);
     } else if (cursorOnly && g_menuScreen == MENU_FLOW && g_flowState == FLOW_ASK_PRINTER
                && g_menuCursor != cursorBefore) {
       static const char *names[8];
@@ -1514,4 +2308,8 @@ inline void menuTick(long delta, bool push, bool start) {
   // live center area (weight, or tag type in NFC-debug) over the static layout
   if (g_menuScreen == MENU_FLOW && (g_flowState == FLOW_IDLE || g_flowState == FLOW_WEIGH_CONFIRM))
     menuCenterTick();
+  // Test menu: NFC/scale live values change on their own, independent of any input --
+  // redraw-if-changed every tick while their screen is showing, same idea as above.
+  if (g_menuScreen == MENU_TEST_NFC)   menuTestNfcTick();
+  if (g_menuScreen == MENU_TEST_SCALE) menuTestScaleTick();
 }

@@ -1,0 +1,45 @@
+name: build
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # PlatformIO's package cache is the slow part of a cold build, not the
+      # compile itself -- keyed on platformio.ini so a dependency bump busts it.
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      # The USB env is the one that actually compiles the firmware; the OTA env
+      # shares [s3_base] entirely and differs only in upload transport, so
+      # building one covers both.
+      - name: Build firmware
+        run: pio run -e esp32s3
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: octoscale-firmware
+          path: .pio/build/esp32s3/firmware.bin
+          if-no-files-found: error

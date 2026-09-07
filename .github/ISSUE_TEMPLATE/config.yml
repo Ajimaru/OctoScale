@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: SpoolManagerExtended (the OctoPrint plugin side)
+    url: https://github.com/Ajimaru/OctoPrint-SpoolManagerExtended/issues
+    about: For database lookups, spool records and anything happening inside OctoPrint.

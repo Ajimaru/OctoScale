@@ -517,20 +517,12 @@ inline bool optInitialize(const uint8_t uid[8], int tagUserBytes, OptLayout &lay
 // foreign, spec-defined format, a partially-populated tag is worse than a clean error
 // (see the plan's reasoning: no silent, format-specific truncation of a standard other
 // tools also read).
-inline bool optWrite(const uint8_t uid[8], const SpoolTagData &d, String &errOut,
-                     int *bytesWrittenOut = nullptr) {
-  errOut = "";
-  if (bytesWrittenOut) *bytesWrittenOut = 0;
-  OptLayout layout;
-  if (!optDetect(uid, layout)) {
-    // Not (yet) an OPT tag -- try to lay one out. optInitialize itself checks the CC
-    // is virgin and refuses anything else (foreign non-OPT NDEF, unrelated data).
-    int userBytes = pn5180NfcvUserBytes(uid);
-    if (!optInitialize(uid, userBytes, layout, errOut)) return false;
-  }
-
+// Encodes the spool's CBOR map into `buf` (capacity `cap`), reporting the number of
+// bytes used in posOut. Split out of optWrite so the capacity can be checked against a
+// scratch buffer BEFORE anything is written to the tag -- see optWrite's comment.
+inline bool optEncodeMain(const SpoolTagData &d, uint8_t *buf, int cap, int &posOut) {
   uint8_t rgb[3] = {0, 0, 0};
-  bool haveColor = pn5180ParseColorHex(d.color, rgb);
+  bool haveColor = pn5180PrimaryColorRgb(d, rgb);  // grammar-aware, see its comment
   int typeIdx = optMaterialTypeIndex(d.material);
 
   // Count fields that will actually be present, matching the presence checks below --
@@ -555,13 +547,7 @@ inline bool optWrite(const uint8_t uid[8], const SpoolTagData &d, String &errOut
   if (d.bedTemperatureMin >= 0) n++;
   if (d.bedTemperatureMax >= 0) n++;
 
-  // calloc, not malloc: the CBOR encoder below only fills the first `pos` bytes --
-  // everything from there to mainSize must be zero, both so optWriteBytes doesn't
-  // write uninitialized heap garbage onto the tag, AND because a shorter write than
-  // whatever was there before must not leave trailing bytes from the old encoding.
-  uint8_t *buf = (uint8_t *)calloc(layout.mainSize, 1);
-  if (!buf) { errOut = "out of memory"; return false; }
-  int pos = 0, cap = layout.mainSize;
+  int pos = 0;
   bool ok = cborWriteMapHeader(buf, pos, cap, (uint32_t)n);
   ok = ok && cborWriteUint(buf, pos, cap, OPT_K_MATERIAL_CLASS) && cborWriteUint(buf, pos, cap, OPT_MATERIAL_CLASS_FFF);
   if (ok && typeIdx >= 0) ok = cborWriteUint(buf, pos, cap, OPT_K_MATERIAL_TYPE) && cborWriteUint(buf, pos, cap, (uint64_t)typeIdx);
@@ -584,8 +570,86 @@ inline bool optWrite(const uint8_t uid[8], const SpoolTagData &d, String &errOut
   if (ok && d.dryingTime >= 0) ok = cborWriteUint(buf, pos, cap, OPT_K_DRYING_TIME) && cborWriteInt(buf, pos, cap, d.dryingTime);
   if (ok && d.td >= 0) ok = cborWriteUint(buf, pos, cap, OPT_K_TRANSMISSION_DISTANCE) && cborWriteFloat(buf, pos, cap, d.td);
 
+  posOut = pos;
+  return ok;
+}
+
+// Computes the Main-region size optInitialize WOULD lay out on a tag of this size,
+// without touching the tag. Same two-pass short/long-form walk as optInitialize itself.
+// Returns 0 when no layout fits at all.
+inline int optPlannedMainSize(int tagUserBytes) {
+  int mimeLen = (int)strlen(OPT_MIME_TYPE);
+  for (int form = 0; form < 2; form++) {
+    bool longForm = (form == 1);
+    int tlvHeaderLen = longForm ? 4 : 2;
+    int recordHeaderLen = (longForm ? 6 : 3) + mimeLen;
+    int payloadBudget = tagUserBytes - 4 - tlvHeaderLen - recordHeaderLen - 1;
+    int mainSize = payloadBudget - OPT_META_SIZE - OPT_AUX_SIZE;
+    if (mainSize < 16) continue;
+    int payloadLen = OPT_META_SIZE + mainSize + OPT_AUX_SIZE;
+    int msgLen = recordHeaderLen + payloadLen;
+    if (!longForm && (payloadLen > 255 || msgLen >= 255)) continue;
+    return mainSize;
+  }
+  return 0;
+}
+
+inline bool optEncodeMain(const SpoolTagData &d, uint8_t *buf, int cap, int &posOut);
+
+// How many bytes this spool's CBOR map actually needs. Encodes into a scratch buffer,
+// so it answers the real question ("does THIS data fit") rather than an estimate.
+// Returns -1 if it doesn't even fit the scratch buffer (far larger than any tag here).
+inline int optRequiredMainBytes(const SpoolTagData &d) {
+  static const int SCRATCH = 1024;
+  uint8_t *tmp = (uint8_t *)calloc(SCRATCH, 1);
+  if (!tmp) return -1;
+  int pos = 0;
+  bool ok = optEncodeMain(d, tmp, SCRATCH, pos);
+  free(tmp);
+  return ok ? pos : -1;
+}
+
+inline bool optWrite(const uint8_t uid[8], const SpoolTagData &d, String &errOut,
+                     int *bytesWrittenOut = nullptr,
+                     int *capAvailOut = nullptr, int *capNeededOut = nullptr) {
+  errOut = "";
+  if (bytesWrittenOut) *bytesWrittenOut = 0;
+  OptLayout layout;
+  if (!optDetect(uid, layout)) {
+    // Not (yet) an OPT tag -- try to lay one out. optInitialize itself checks the CC
+    // is virgin and refuses anything else (foreign non-OPT NDEF, unrelated data).
+    int userBytes = pn5180NfcvUserBytes(uid);
+    // Capacity check BEFORE optInitialize, not after. optInitialize writes the CC, the
+    // NDEF/record header and empty Meta/Main/Aux maps onto the tag; only afterwards did
+    // the CBOR encoding below discover the data didn't fit. The write then failed with a
+    // clean error, but the tag was left carrying a half-built OpenPrintTag structure --
+    // enough for occupancy to read it back as "foreign" and for the TFT to warn about
+    // overwriting somebody else's tag, on a tag OctoScale itself had just written.
+    // Checking first means a tag that cannot hold the data is left exactly as it was.
+    int planned = optPlannedMainSize(userBytes);
+    int needed = optRequiredMainBytes(d);
+    if (capAvailOut) *capAvailOut = planned;
+    if (capNeededOut) *capNeededOut = needed;
+    if (planned <= 0 || (needed >= 0 && needed > planned)) {
+      errOut = "spool data does not fit into this tag's OpenPrintTag Main region (" +
+               String(planned) + " B available, " + String(needed) + " B needed) -- "
+               "use a larger NFC-V tag or the Extended format";
+      return false;
+    }
+    if (!optInitialize(uid, userBytes, layout, errOut)) return false;
+  }
+
+  uint8_t *buf = (uint8_t *)calloc(layout.mainSize, 1);
+  if (!buf) { errOut = "out of memory"; return false; }
+  int pos = 0;
+  bool ok = optEncodeMain(d, buf, layout.mainSize, pos);
   if (!ok) {
     free(buf);
+    // Reached only for a tag that was ALREADY an OPT tag (optDetect succeeded, so the
+    // pre-flight check above was skipped). Nothing has been written at this point --
+    // the encode happens entirely in RAM -- so the tag keeps its previous contents.
+    if (capAvailOut) *capAvailOut = layout.mainSize;
+    if (capNeededOut) *capNeededOut = optRequiredMainBytes(d);
     errOut = "spool data does not fit into this tag's OpenPrintTag Main region (" +
              String(layout.mainSize) + " B) -- use a larger NFC-V tag or the Extended format";
     return false;
@@ -614,7 +678,8 @@ inline bool optWrite(const uint8_t uid[8], const SpoolTagData &d, String &errOut
 inline bool pn5180WriteSpoolTagOpt(const SpoolTagData &d, String &formatOut,
                                    int &bytesWrittenOut, String &droppedFieldsOut, String &errOut,
                                    const String &nfcvFormat = "extended",
-                                   const String &ntagFormat = "openSpool") {
+                                   const String &ntagFormat = "openSpool",
+                                   int *capAvailOut = nullptr, int *capNeededOut = nullptr) {
   formatOut = ""; bytesWrittenOut = 0; droppedFieldsOut = ""; errOut = "";
   if (nfcvFormat == "openPrintTag") {
     String uidHex;
@@ -626,7 +691,8 @@ inline bool pn5180WriteSpoolTagOpt(const SpoolTagData &d, String &formatOut,
       // (see this file's top comment); the load flow falls back to a UID lookup for
       // these tags, exactly like NTAG/NFC-V's own openSpool already does for the same
       // reason (NDEF occupies the blocks the legacy anchor would otherwise use).
-      bool ok = optWrite(nfcvUid, d, errOut, &bytesWrittenOut);  // reports the CBOR-encoded Main region size
+      bool ok = optWrite(nfcvUid, d, errOut, &bytesWrittenOut,
+                         capAvailOut, capNeededOut);  // reports the CBOR-encoded Main region size
       return ok;
     }
     // Not NFC-V -- fall through to the normal per-tag-type dispatch below, which will

@@ -1,0 +1,23 @@
+name: Feature request
+description: Suggest an addition or a change
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The situation you are in, not the solution you have in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like to see
+
+  - type: checkboxes
+    id: hardware
+    attributes:
+      label: Hardware
+      options:
+        - label: This would need hardware that is not in the current BOM

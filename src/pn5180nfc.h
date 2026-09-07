@@ -77,7 +77,7 @@ static const uint8_t MIFARE_EXT_MAGIC1 = 'S';
 // of block 8's) so a v3 reader can tell "v3 fields genuinely present and intact" apart
 // from "v3 version byte was set but the write was cut off before the new blocks
 // landed" -- block 8 is still written LAST overall, same discipline as v1/v2.
-static const uint8_t MIFARE_EXT_VERSION = 0x03;
+static const uint8_t MIFARE_EXT_VERSION = 0x04;  // v4: multi-colour in block 10[2..8]
 static const uint8_t MIFARE_EXT_BLOCK8  = 8;
 static const uint8_t MIFARE_EXT_BLOCK9  = 9;
 static const uint8_t MIFARE_EXT_BLOCK10 = 10;  // v2+: [0] bed temp min [1] bed temp max
@@ -117,13 +117,19 @@ static const uint8_t MIFARE_EXT_BLOCK36 = 36;   // v3: sector 9, commit marker
 //   Block 23 (4 B, v2+): [0] bed temp min (uint8) [1] bed temp max (uint8) [2-3] reserved
 static const uint8_t NFCV_EXT_MAGIC0 = 'O';
 static const uint8_t NFCV_EXT_MAGIC1 = 'S';
-static const uint8_t NFCV_EXT_VERSION = 0x02;  // v2: physBuf[14-15] + block 23 hold temp min/max
+static const uint8_t NFCV_EXT_VERSION = 0x03;  // v3: multi-colour in blocks 24-25
 static const uint8_t NFCV_EXT_BLOCK_START = 3;   // magic/version/flags/dbId: blocks 3-4
 static const uint8_t NFCV_EXT_BLOCK_NUM   = 5;   // weights/density: blocks 5-6
 static const uint8_t NFCV_EXT_BLOCK_PHYS  = 7;   // diameter/temps/rgb/crc: blocks 7-10
 static const uint8_t NFCV_EXT_BLOCK_STR   = 11;  // strings: blocks 11-22
 static const int NFCV_EXT_STRING_BYTES = 48;
 static const uint8_t NFCV_EXT_BLOCK_TEMPRANGE = 23;  // v2+: bed temp min/max (4 B block)
+// v3: multi-colour. tempRangeBuf has only [2..3] free -- not enough for 2 RGB trios plus
+// flags -- so this takes two fresh blocks from the tag's unused tail (24-27 are free on
+// the smallest ICODE this project targets, 28 blocks / 112 B). Colour 1 stays in
+// physBuf where it always was.
+static const uint8_t NFCV_EXT_BLOCK_COLOR = 24;   // [0..2] colour 2, [3] flags
+                                                  // block 25: [0..2] colour 3, [3] reserved
 static const uint8_t NFCV_BLOCK_SIZE = 4;
 
 // --- NTAG Extended layout (NTAG215/216 only -- 213's ~144 B usable can't fit the v3
@@ -159,7 +165,7 @@ static const uint8_t NFCV_BLOCK_SIZE = 4;
 //                       only, no strings" (commit marker missing/incomplete).
 static const uint8_t NTAG_EXT_MAGIC0 = 'O';
 static const uint8_t NTAG_EXT_MAGIC1 = 'X';
-static const uint8_t NTAG_EXT_VERSION = 0x01;
+static const uint8_t NTAG_EXT_VERSION = 0x02;  // v2: multi-colour on pages 19-20
 static const uint8_t NTAG_EXT_PAGE_START = 4;    // magic/version/flags/dbId: pages 4-5
 static const uint8_t NTAG_EXT_PAGE_NUM   = 6;    // totalWeight/spoolWeight/usedWeight/remainingWeight: pages 6-7
 static const uint8_t NTAG_EXT_PAGE_DENSITY = 8;  // density+diameter: page 8
@@ -168,7 +174,9 @@ static const uint8_t NTAG_EXT_PAGE_TEMPMIN = 12; // temperatureMin/bedTemperatur
 static const uint8_t NTAG_EXT_PAGE_CRC   = 13;   // CRC-8: page 13
 static const uint8_t NTAG_EXT_PAGE_LEN   = 14;   // totalLength/usedLength/cost/firstUse: pages 14-16
 static const uint8_t NTAG_EXT_PAGE_DATES = 17;   // lastUse/purchasedOn: pages 17-18
-static const uint8_t NTAG_EXT_PAGE_STR   = 19;   // strings start here
+static const uint8_t NTAG_EXT_PAGE_COLOR = 19;  // v2: [0..2] colour 2, [3] flags
+                                                // page 20: [0..2] colour 3, [3] reserved
+static const uint8_t NTAG_EXT_PAGE_STR   = 21;  // strings start here (was 19 pre-v2)
 static const uint8_t NTAG_EXT_MAGIC2_0 = 'N';    // commit marker sub-magic (last page)
 static const uint8_t NTAG_EXT_MAGIC2_1 = 'X';
 // CRC coverage: pages 4-12 (36 B) + page 13's own first byte position is the CRC
@@ -203,6 +211,16 @@ struct SpoolTagData {
   long databaseId = -1;
   String material = "", vendor = "", colorName = "";
   String color = "";       // "#rrggbb" or "#rrggbb;#rrggbb..." or "rainbow"/"transparent..."
+  // v4 multi-color: SpoolManagerExtended's `color` field is a small grammar, not a hex
+  // string -- "[transparent:]#hex[;#hex[;#hex]]" or the bare sentinel "rainbow" (see
+  // its SPOOLMANAGER_UTILS.composeSpoolColor/parseSpoolColor). Up to THREE colours (the
+  // UI has three pickers), plus two independent flags. Earlier formats stored only the
+  // first colour and dropped the rest silently; these fields carry the whole value.
+  // colorCount 0 with isTransparent set is legitimate ("transparent", untinted).
+  uint8_t colorRgb[3][3] = {{0,0,0},{0,0,0},{0,0,0}};  // up to 3 colours, RGB each
+  uint8_t colorCount = 0;      // how many of colorRgb[] are valid (0-3)
+  bool isTransparent = false;  // "transparent:" prefix
+  bool isRainbow = false;      // bare "rainbow" sentinel
   float diameter = -1;     // mm
   float diameterTolerance = -1;
   float density = -1;      // g/cm^3
@@ -268,6 +286,88 @@ inline uint8_t pn5180Crc8(const uint8_t *data, int len) {
 // followed by more colors separated by ';' (multi-color spools -- only the first is
 // storable in the 3-byte RGB slot), or a sentinel like "rainbow"/"transparent[:#hex]"
 // (neither has a single RGB value -- returns false, caller leaves the RGB bytes zeroed).
+// Parses SpoolManagerExtended's full `color` grammar into the v4 fields. The single-
+// colour pn5180ParseColorHex below stays as-is: every pre-v4 write path still uses it,
+// and the primary colour must keep landing in the same 3-byte slot it always has.
+//
+//   "rainbow"                       -> rainbow flag, no colours
+//   "transparent"                   -> transparent flag, no colours (untinted)
+//   "transparent:#rgb[;#rgb[;#rgb]]"-> transparent flag + 1-3 colours
+//   "#rgb[;#rgb[;#rgb]]"            -> 1-3 colours, opaque
+//
+// Anything unparseable leaves the outputs at "nothing set" rather than guessing --
+// a wrong colour on a tag is worse than no colour, same reasoning as everywhere else.
+// Packs the v4 colour flags into one byte, shared by all three carriers so the wire
+// encoding cannot drift apart between them: bit0 transparent, bits1-2 colour count
+// (0-3), bit3 rainbow. 0x00 therefore means "no colour information", which is exactly
+// what a pre-v4 tag's zeroed reserve bytes read back as -- no separate presence flag
+// needed.
+inline bool pn5180ParseColorHex(const String &color, uint8_t rgbOut[3]);  // defined below
+
+inline uint8_t pn5180PackColorFlags(const SpoolTagData &d) {
+  uint8_t f = 0;
+  if (d.isTransparent) f |= 0x01;
+  f |= (uint8_t)((d.colorCount & 0x03) << 1);
+  if (d.isRainbow) f |= 0x08;
+  return f;
+}
+inline void pn5180UnpackColorFlags(uint8_t f, SpoolTagData &d) {
+  d.isTransparent = (f & 0x01) != 0;
+  d.colorCount = (uint8_t)((f >> 1) & 0x03);
+  d.isRainbow = (f & 0x08) != 0;
+}
+
+inline void pn5180ParseColorGrammar(const String &color, uint8_t rgbOut[3][3],
+                                    uint8_t &countOut, bool &transparentOut,
+                                    bool &rainbowOut) {
+  countOut = 0; transparentOut = false; rainbowOut = false;
+  for (int i = 0; i < 3; i++) rgbOut[i][0] = rgbOut[i][1] = rgbOut[i][2] = 0;
+
+  String c = color;
+  c.trim();
+  if (c.length() == 0) return;
+
+  String lower = c; lower.toLowerCase();
+  if (lower == "rainbow") { rainbowOut = true; return; }
+  if (lower.startsWith("transparent")) {
+    transparentOut = true;
+    int colon = c.indexOf(':');
+    if (colon < 0) return;          // bare "transparent", no base colours
+    c = c.substring(colon + 1);
+    c.trim();
+  }
+
+  // Split on ';' -- at most 3 colours are storable, extras are ignored (the UI only
+  // offers three pickers, so a longer list would be malformed input rather than data).
+  int start = 0;
+  while (start < (int)c.length() && countOut < 3) {
+    int sep = c.indexOf(';', start);
+    String part = (sep < 0) ? c.substring(start) : c.substring(start, sep);
+    part.trim();
+    uint8_t rgb[3];
+    if (pn5180ParseColorHex(part, rgb)) {
+      rgbOut[countOut][0] = rgb[0]; rgbOut[countOut][1] = rgb[1]; rgbOut[countOut][2] = rgb[2];
+      countOut++;
+    }
+    if (sep < 0) break;
+    start = sep + 1;
+  }
+}
+
+// Primary colour for the single-RGB slot every carrier has had since v1. Prefers the
+// already-parsed grammar result (d.colorRgb[0]) over re-parsing d.color, because
+// pn5180ParseColorHex alone returns false for "transparent:#ff0000;..." -- the string
+// starts with 't', not '#'. That is exactly right for a plain hex parser and exactly
+// wrong here: it silently dropped the primary colour of every transparent multi-colour
+// spool, writing 0,0,0 while colours 2 and 3 came through fine.
+inline bool pn5180PrimaryColorRgb(const SpoolTagData &d, uint8_t rgbOut[3]) {
+  if (d.colorCount > 0) {
+    for (int i = 0; i < 3; i++) rgbOut[i] = d.colorRgb[0][i];
+    return true;
+  }
+  return pn5180ParseColorHex(d.color, rgbOut);  // pre-grammar callers / plain "#rrggbb"
+}
+
 inline bool pn5180ParseColorHex(const String &color, uint8_t rgbOut[3]) {
   if (color.length() < 7 || color[0] != '#') return false;  // sentinels don't start with '#'
   char buf[3] = {0, 0, 0};
@@ -1098,6 +1198,20 @@ inline bool pn5180UidHexToBytes4(const String &hex, uint8_t out[4]) {
   return true;
 }
 
+// NFC-V counterpart of the 4-byte helper above. pn5180Probe builds the ISO15693 UID
+// string big-endian (byte 7 first, the usual display order), so decoding it back into
+// the little-endian byte array the PN5180 library expects means reversing as we go --
+// feeding a straight-order array to readSingleBlock addresses a different (nonexistent)
+// tag and every block read fails.
+inline bool pn5180UidHexToBytes8Reversed(const String &hex, uint8_t out[8]) {
+  if (hex.length() != 16) return false;
+  for (int i = 0; i < 8; i++) {
+    char b[3] = { hex[i*2], hex[i*2+1], 0 };
+    out[7 - i] = (uint8_t)strtoul(b, nullptr, 16);
+  }
+  return true;
+}
+
 // Authenticates the sector containing `block` against the currently-selected tag's UID.
 // Must be called with the tag freshly selected (right after pn5180ProbeNfcA) --
 // authentication is bound to the current RF session and is lost on reset()/setupRF().
@@ -1238,6 +1352,28 @@ inline int pn5180DumpNtagPages(uint8_t *out, int maxPages) {
   return got;
 }
 
+// NFC-V (ISO15693) raw dump -- the third dump path alongside Mifare Classic and NTAG.
+// No authentication exists here either (ISO15693 has no Crypto1 concept), so this is a
+// plain UID-addressed block walk from block 0.
+//
+// Starting at block 0 is deliberate, same reasoning as the NTAG walk above: consumers
+// index absolute block offsets, and a shifted dump corrupts their parsing silently.
+// Block 0 is the Capability Container on an NDEF-formatted tag.
+//
+// Reads stop at the first failing block rather than erroring out -- ICODE variants
+// differ in size and getSystemInfo's numBlocks is not always trustworthy, so the honest
+// answer is "this is how far the tag actually goes". Returns the number of BLOCKS read
+// (blockSize bytes each, almost always 4); 0 means even block 0 was unreadable.
+// Requires a prior successful getInventory (the UID is passed in explicitly).
+inline int pn5180DumpNfcvBlocks(const uint8_t uid[8], uint8_t *out, int maxBlocks) {
+  int got = 0;
+  while (got < maxBlocks) {
+    if (!pn5180NfcvReadBlock(uid, (uint8_t)got, out + got * NFCV_BLOCK_SIZE)) break;
+    got++;
+  }
+  return got;
+}
+
 // NTAG/Ultralight counterpart to pn5180MifareOccupancy below. These tags have no keys,
 // so the Capability Container (page 3) plus the first user page carry the answer:
 // an all-zero CC means the tag was never written, an NDEF CC (0xE1) with an empty
@@ -1266,6 +1402,41 @@ inline String pn5180NtagOccupancy() {
   if (alreadyNdef) {
     const uint8_t *u = pages + 4 * 4;
     bool emptyMsg = (u[0] == 0x00) || (u[0] == 0xFE) || (u[0] == 0x03 && u[1] == 0x00);
+    return emptyMsg ? "empty" : "foreign";
+  }
+  return "foreign";  // non-virgin, non-NDEF CC -> somebody else formatted this
+}
+
+// NFC-V (ISO15693) counterpart to pn5180NtagOccupancy/pn5180MifareOccupancy. Fills the
+// third carrier's occupancy, which used to stay "" unconditionally: the poll path had no
+// block reader when this was written, so a blank ISO15693 tag was indistinguishable from
+// a vendor-written one. That gap surfaced as a real user-visible bug -- SpoolManager-
+// Extended falls back to a heuristic when occupancy is empty ("no Extended data + no
+// spool id + a recognised tag type" -> assume vendor tag), which fires on every blank
+// NFC-V tag and warned the user about overwriting a vendor tag that was their own blank.
+//
+// Three-way, NOT a plain all-zero scan. An all-zero test looks correct and is wrong:
+// a factory-NDEF-formatted-but-empty tag carries a CC plus a terminator TLV, so it is
+// not all-zero and would be reported "foreign" -- exactly the case that was being
+// misreported. Measured on a real blank ICODE (UID E00401532560D3EA): all blocks zero
+// EXCEPT block 23 (283C0000) and block 27 (000000FE, the NDEF terminator). Same
+// CC-driven reasoning pn5180NtagOccupancy already uses.
+//
+// Returns "empty", "foreign", or "" when it could not be determined (transport error).
+// Requires a prior successful getInventory (the UID is passed in explicitly).
+inline String pn5180NfcvOccupancy(const uint8_t uid[8]) {
+  uint8_t cc[4];
+  if (!pn5180NfcvReadBlock(uid, 0, cc)) return "";  // transport error -> unknown, stay silent
+  bool alreadyNdef = false;
+  if (pn5180NfcvCcIsVirgin(cc, alreadyNdef)) return "empty";  // all-zero CC -> never written
+  // NDEF-formatted: 4-byte CC magic 0xE1, or the 8-byte form 0xE2 a foreign tag may use
+  // (we only ever write the 4-byte one). Empty message = a terminator or a zero-length
+  // TLV right at the start of the data area, same shapes pn5180NtagOccupancy tests for.
+  if (alreadyNdef || cc[0] == 0xE2) {
+    uint8_t first[4];
+    if (!pn5180NfcvReadBlock(uid, 1, first)) return "";
+    bool emptyMsg = (first[0] == 0x00) || (first[0] == 0xFE) ||
+                    (first[0] == 0x03 && first[1] == 0x00);
     return emptyMsg ? "empty" : "foreign";
   }
   return "foreign";  // non-virgin, non-NDEF CC -> somebody else formatted this
@@ -1630,7 +1801,7 @@ inline bool pn5180WriteMifareExtended(const String &uidHex, const SpoolTagData &
   block9[8] = (int8_t)constrain(d.offsetBedTemperature, -127, 127);
   block9[9] = (int8_t)constrain(d.offsetEnclosureTemperature, -127, 127);
   uint8_t rgb[3] = {0, 0, 0};
-  pn5180ParseColorHex(d.color, rgb);  // leaves rgb zeroed if unparseable -- not an error
+  pn5180PrimaryColorRgb(d, rgb);  // leaves rgb zeroed if unparseable -- not an error
   block9[10] = rgb[0]; block9[11] = rgb[1]; block9[12] = rgb[2];
   block9[13] = (d.temperatureMin >= 0 && d.temperatureMin <= 254) ? (uint8_t)d.temperatureMin : 0xFF;
   block9[14] = (d.temperatureMax >= 0 && d.temperatureMax <= 254) ? (uint8_t)d.temperatureMax : 0xFF;
@@ -1639,6 +1810,14 @@ inline bool pn5180WriteMifareExtended(const String &uidHex, const SpoolTagData &
   uint8_t block10[16] = {0};
   block10[0] = (d.bedTemperatureMin >= 0 && d.bedTemperatureMin <= 254) ? (uint8_t)d.bedTemperatureMin : 0xFF;
   block10[1] = (d.bedTemperatureMax >= 0 && d.bedTemperatureMax <= 254) ? (uint8_t)d.bedTemperatureMax : 0xFF;
+  // v4 multi-colour: colours 2 and 3 plus the flags byte go into block 10's reserve.
+  // Colour 1 stays in block 9[10..12] where every previous version put it, so a v3
+  // reader still finds the primary colour exactly where it expects it.
+  for (int i = 0; i < 3; i++) {
+    block10[2 + i] = (d.colorCount > 1) ? d.colorRgb[1][i] : 0;
+    block10[5 + i] = (d.colorCount > 2) ? d.colorRgb[2][i] : 0;
+  }
+  block10[8] = pn5180PackColorFlags(d);
 
   if (!pn5180MifareWriteBlock(MIFARE_EXT_BLOCK9, block9, errOut)) {
     g_pn5180->reset(); g_pn5180->setupRF();
@@ -1769,12 +1948,15 @@ inline bool pn5180WriteMifareExtended(const String &uidHex, const SpoolTagData &
   // block 36 are NOT covered -- same precedent as the v1/v2 string block, which relies
   // solely on flags bit0 as its presence indicator, no CRC; block 36's own sub-magic
   // serves that same role for the new strings).
-  uint8_t crcBuf[49];
+  // v4 widens the CRC from block10[0..1] to block10[0..8] so the new colour bytes are
+  // covered like every other numeric field. That shifts block16 within the buffer --
+  // the reader below picks its length by version, so v1/v2/v3 tags keep their own.
+  uint8_t crcBuf[56];
   memcpy(crcBuf, block8, 16);
   memcpy(crcBuf + 16, block9, 15);
-  memcpy(crcBuf + 31, block10, 2);
-  memcpy(crcBuf + 33, block16, 16);
-  block9[15] = pn5180Crc8(crcBuf, 49);
+  memcpy(crcBuf + 31, block10, 9);
+  memcpy(crcBuf + 40, block16, 16);
+  block9[15] = pn5180Crc8(crcBuf, 56);
   if (!pn5180MifareWriteBlock(MIFARE_EXT_BLOCK9, block9, errOut)) {
     g_pn5180->reset(); g_pn5180->setupRF();
     return false;
@@ -1805,6 +1987,7 @@ inline bool pn5180ReadMifareExtended(const String &uidHex, SpoolTagData &out) {
   // return whatever garbage/factory data is there, so each is gated on version.
   bool isV2 = block8[2] >= 0x02;
   bool isV3 = block8[2] >= 0x03;
+  bool isV4 = block8[2] >= 0x04;
   uint8_t block10[16] = {0};
   if (isV2 && !pn5180MifareReadBlock(MIFARE_EXT_BLOCK10, block10)) return false;
   uint8_t block16[16] = {0};
@@ -1818,12 +2001,23 @@ inline bool pn5180ReadMifareExtended(const String &uidHex, SpoolTagData &out) {
   uint8_t block17[16] = {0};
   bool haveB17 = isV3 && pn5180MifareReadBlock(MIFARE_EXT_BLOCK17, block17);
 
-  uint8_t crcBuf[49];
+  // CRC coverage grew with each version and the length is what tells them apart:
+  //   v1 31 B, v2 +block10[0..1] = 33, v3 +block16 = 49, v4 widens block10 to [0..8] = 56.
+  // Picking the wrong length is the one way a valid tag reads back as corrupt, so this
+  // mirrors the writer exactly -- including that v4 places block16 at a different
+  // offset inside the buffer than v3 did.
+  uint8_t crcBuf[56];
   memcpy(crcBuf, block8, 16);
   memcpy(crcBuf + 16, block9, 15);
   int crcLen = 31;
-  if (isV2) { memcpy(crcBuf + 31, block10, 2); crcLen = 33; }
-  if (isV3) { memcpy(crcBuf + 33, block16, 16); crcLen = 49; }
+  if (isV4) {
+    memcpy(crcBuf + 31, block10, 9);
+    memcpy(crcBuf + 40, block16, 16);
+    crcLen = 56;
+  } else {
+    if (isV2) { memcpy(crcBuf + 31, block10, 2); crcLen = 33; }
+    if (isV3) { memcpy(crcBuf + 33, block16, 16); crcLen = 49; }
+  }
   if (pn5180Crc8(crcBuf, crcLen) != block9[15]) return false;  // corrupt/partial write -> treat as absent
 
   out.databaseId = (long)(block8[4] | (block8[5] << 8) | (block8[6] << 16) | ((uint32_t)block8[7] << 24));
@@ -1849,6 +2043,18 @@ inline bool pn5180ReadMifareExtended(const String &uidHex, SpoolTagData &out) {
     out.temperatureMax    = (block9[14] == 0xFF) ? -1 : block9[14];
     out.bedTemperatureMin = (block10[0] == 0xFF) ? -1 : block10[0];
     out.bedTemperatureMax = (block10[1] == 0xFF) ? -1 : block10[1];
+    if (isV4) {
+      pn5180UnpackColorFlags(block10[8], out);
+      for (int i = 0; i < 3; i++) {
+        out.colorRgb[1][i] = block10[2 + i];
+        out.colorRgb[2][i] = block10[5 + i];
+      }
+      // Colour 1 lives in block 9 (read into out.color above as "#rrggbb"); mirror it
+      // into slot 0 so colorRgb[] is complete rather than having a hole at index 0.
+      uint8_t c0[3];
+      if (pn5180ParseColorHex(out.color, c0))
+        for (int i = 0; i < 3; i++) out.colorRgb[0][i] = c0[i];
+    }
   }
   if (isV3) {
     out.remainingWeight = pn5180UnscaleU16((uint16_t)(block16[0] | (block16[1] << 8)), 1.0f);
@@ -1953,10 +2159,18 @@ inline String pn5180BuildOpenSpoolJson(const SpoolTagData &d, int budgetBytes, S
   // over budget. os_db_id is the OctoScale extension (lets a re-read resolve the spool
   // directly instead of falling back to a UID lookup) and is treated as high priority.
   struct Field { const char *key; String value; bool isString; bool present; };
-  char osDbId[16]; if (d.databaseId >= 0) snprintf(osDbId, sizeof(osDbId), "%ld", d.databaseId);
-  char weightBuf[16]; if (d.totalWeight >= 0) snprintf(weightBuf, sizeof(weightBuf), "%.0f", d.totalWeight);
-  char diaBuf[16]; if (d.diameter >= 0) snprintf(diaBuf, sizeof(diaBuf), "%.2f", d.diameter);
-  char hotMin[8], hotMax[8], bedMin[8], bedMax[8];
+  // All zero-initialised: the Field[] table below builds String(buf) for EVERY entry
+  // regardless of its 'present' flag (the flag only decides whether the field is later
+  // emitted), so a buffer left untouched by its guarded snprintf would be read while
+  // uninitialised. Sized for the widest output each format can produce ("%d" from an
+  // int is up to 11 characters plus the terminator).
+  char osDbId[16] = {0};
+  if (d.databaseId >= 0) snprintf(osDbId, sizeof(osDbId), "%ld", d.databaseId);
+  char weightBuf[16] = {0};
+  if (d.totalWeight >= 0) snprintf(weightBuf, sizeof(weightBuf), "%.0f", d.totalWeight);
+  char diaBuf[16] = {0};
+  if (d.diameter >= 0) snprintf(diaBuf, sizeof(diaBuf), "%.2f", d.diameter);
+  char hotMin[12] = {0}, hotMax[12] = {0}, bedMin[12] = {0}, bedMax[12] = {0};
   if (d.temperatureMin >= 0) snprintf(hotMin, sizeof(hotMin), "%d", d.temperatureMin);
   if (d.temperatureMax >= 0) snprintf(hotMax, sizeof(hotMax), "%d", d.temperatureMax);
   if (d.bedTemperatureMin >= 0) snprintf(bedMin, sizeof(bedMin), "%d", d.bedTemperatureMin);
@@ -2294,7 +2508,7 @@ inline bool pn5180WriteNfcvExtended(const uint8_t uid[8], const SpoolTagData &d,
   physBuf[8] = (int8_t)constrain(d.offsetBedTemperature, -127, 127);
   physBuf[9] = (int8_t)constrain(d.offsetEnclosureTemperature, -127, 127);
   uint8_t rgb[3] = {0, 0, 0};
-  pn5180ParseColorHex(d.color, rgb);
+  pn5180PrimaryColorRgb(d, rgb);
   physBuf[10] = rgb[0]; physBuf[11] = rgb[1]; physBuf[12] = rgb[2];
   physBuf[13] = 0;  // CRC placeholder, patched once the numeric block is known below
   physBuf[14] = (d.temperatureMin >= 0 && d.temperatureMin <= 254) ? (uint8_t)d.temperatureMin : 0xFF;
@@ -2344,6 +2558,22 @@ inline bool pn5180WriteNfcvExtended(const uint8_t uid[8], const SpoolTagData &d,
   bytesWrittenOut += 16;
 
   if (!pn5180NfcvWriteBlock(uid, NFCV_EXT_BLOCK_TEMPRANGE, tempRangeBuf, errOut)) return false;
+  // v3 multi-colour, blocks 24-25. Written unconditionally, like every other field:
+  // colour data is spool data, not a nice-to-have. Extended already needs blocks 0-23
+  // (legacy anchor, header, 48 B of strings, temp range), so any tag that can carry
+  // Extended at all has 24 blocks; only the narrow 24/25-block case would lack these
+  // two, and no ISO15693 variant in circulation has that size (SLIX has 28). A tag
+  // that genuinely cannot hold them fails the write with a clear block-write error
+  // rather than silently dropping colours the user asked to store.
+  uint8_t colBuf[4] = {0}, col2Buf[4] = {0};
+  for (int i = 0; i < 3; i++) {
+    colBuf[i]  = (d.colorCount > 1) ? d.colorRgb[1][i] : 0;
+    col2Buf[i] = (d.colorCount > 2) ? d.colorRgb[2][i] : 0;
+  }
+  colBuf[3] = pn5180PackColorFlags(d);
+  if (!pn5180NfcvWriteBlock(uid, NFCV_EXT_BLOCK_COLOR, colBuf, errOut)) return false;
+  if (!pn5180NfcvWriteBlock(uid, NFCV_EXT_BLOCK_COLOR + 1, col2Buf, errOut)) return false;
+  bytesWrittenOut += 8;
   bytesWrittenOut += 4;
 
   // Magic LAST -- the commit marker.
@@ -2372,6 +2602,17 @@ inline bool pn5180ReadNfcvExtended(const uint8_t uid[8], SpoolTagData &out) {
   bool isV2 = magicBuf[2] >= 0x02;
   uint8_t tempRangeBuf[4] = {0};
   if (isV2 && !pn5180NfcvReadBlock(uid, NFCV_EXT_BLOCK_TEMPRANGE, tempRangeBuf)) return false;
+  // v3 colour blocks -- required on a v3 tag, so a read failure fails the whole read
+  // like any other block. They stay outside the CRC only because the CRC's length is
+  // itself the version discriminator here (see the Mifare reader's comment); the
+  // version byte already gates them, which is the same guarantee.
+  uint8_t colBuf[4] = {0}, col2Buf[4] = {0};
+  bool isV3nfcv = magicBuf[2] >= 0x03;
+  if (isV3nfcv) {
+    if (!pn5180NfcvReadBlock(uid, NFCV_EXT_BLOCK_COLOR, colBuf)) return false;
+    if (!pn5180NfcvReadBlock(uid, NFCV_EXT_BLOCK_COLOR + 1, col2Buf)) return false;
+  }
+  bool haveCol = isV3nfcv;
 
   uint8_t crcBuf[33];
   memcpy(crcBuf, magicBuf, 8);
@@ -2408,6 +2649,16 @@ inline bool pn5180ReadNfcvExtended(const uint8_t uid[8], SpoolTagData &out) {
     out.temperatureMax    = (physBuf[15] == 0xFF) ? -1 : physBuf[15];
     out.bedTemperatureMin = (tempRangeBuf[0] == 0xFF) ? -1 : tempRangeBuf[0];
     out.bedTemperatureMax = (tempRangeBuf[1] == 0xFF) ? -1 : tempRangeBuf[1];
+  }
+  if (haveCol) {
+    pn5180UnpackColorFlags(colBuf[3], out);
+    for (int i = 0; i < 3; i++) {
+      out.colorRgb[1][i] = colBuf[i];
+      out.colorRgb[2][i] = col2Buf[i];
+    }
+    uint8_t c0[3];
+    if (pn5180ParseColorHex(out.color, c0))
+      for (int i = 0; i < 3; i++) out.colorRgb[0][i] = c0[i];
   }
 
   bool hasStrings = (magicBuf[3] & 0x01) != 0;
@@ -2545,7 +2796,7 @@ inline bool pn5180WriteNtagExtended(const SpoolTagData &d, int &bytesWrittenOut,
   phys2[2] = (int8_t)constrain(d.offsetBedTemperature, -127, 127);
   phys2[3] = (int8_t)constrain(d.offsetEnclosureTemperature, -127, 127);
   uint8_t rgb[3] = {0, 0, 0};
-  pn5180ParseColorHex(d.color, rgb);
+  pn5180PrimaryColorRgb(d, rgb);
   uint8_t *phys3 = fp(NTAG_EXT_PAGE_PHYS + 2);
   phys3[0] = rgb[0]; phys3[1] = rgb[1]; phys3[2] = rgb[2];
   phys3[3] = (d.temperatureMax >= 0 && d.temperatureMax <= 254) ? (uint8_t)d.temperatureMax : 0xFF;
@@ -2586,6 +2837,18 @@ inline bool pn5180WriteNtagExtended(const SpoolTagData &d, int &bytesWrittenOut,
   datesp[0] = (uint8_t)(lu & 0xFF); datesp[1] = (uint8_t)(lu >> 8);
   datesp[2] = (uint8_t)(po & 0xFF); datesp[3] = (uint8_t)(po >> 8);
   uint8_t *datesp2 = fp(NTAG_EXT_PAGE_DATES + 1);
+  // v2 multi-colour, pages 19-20. These sit INSIDE the fixed region (which grew from 15
+  // to 17 pages when NTAG_EXT_PAGE_STR moved from 19 to 21), so they are written by the
+  // same loop as everything else -- no separate write step, no partial-write window.
+  // Colour 1 stays on page 11[0..2] where v1 put it.
+  uint8_t *colp = fp(NTAG_EXT_PAGE_COLOR);
+  uint8_t *colp2 = fp(NTAG_EXT_PAGE_COLOR + 1);
+  for (int i = 0; i < 3; i++) {
+    colp[i]  = (d.colorCount > 1) ? d.colorRgb[1][i] : 0;
+    colp2[i] = (d.colorCount > 2) ? d.colorRgb[2][i] : 0;
+  }
+  colp[3] = pn5180PackColorFlags(d);
+  colp2[3] = 0;  // reserved
   datesp2[0] = (uint8_t)(luM & 0xFF); datesp2[1] = (uint8_t)(luM >> 8);
   datesp2[2] = (uint8_t)(poM & 0xFF); datesp2[3] = (uint8_t)(poM >> 8);
 
@@ -2682,7 +2945,7 @@ inline bool pn5180WriteNtagTigerTag(const SpoolTagData &d, int &bytesWrittenOut,
   buf[14] = (uint8_t)(brandId >> 8); buf[15] = (uint8_t)brandId;
 
   uint8_t rgb[3] = {0, 0, 0};
-  pn5180ParseColorHex(d.color, rgb);  // leaves rgb zeroed if unparseable -- not an error
+  pn5180PrimaryColorRgb(d, rgb);  // leaves rgb zeroed if unparseable -- not an error
   buf[16] = rgb[0]; buf[17] = rgb[1]; buf[18] = rgb[2]; buf[19] = 0xFF;  // A=opaque
 
   // Measure (offset 20-22, u24 BE): spool's total weight/length, whichever the
@@ -2856,6 +3119,20 @@ inline bool pn5180ReadNtagExtended(SpoolTagData &out) {
   uint8_t *datesp2 = fp(NTAG_EXT_PAGE_DATES + 1);
   out.lastUseMinuteOfDay = pn5180UnscaleMinuteOfDay(datesp2[0] | (datesp2[1] << 8));
   out.purchasedOnMinuteOfDay = pn5180UnscaleMinuteOfDay(datesp2[2] | (datesp2[3] << 8));
+  // v2 multi-colour. Version-gated: on a v1 tag pages 19-20 are the first two STRING
+  // pages, so reading colours from them would produce garbage RGB from UTF-8 bytes.
+  if (fixedBuf[2] >= 0x02) {   // fixedBuf[2] = the version byte on page 4
+    uint8_t *colp = fp(NTAG_EXT_PAGE_COLOR);
+    uint8_t *colp2 = fp(NTAG_EXT_PAGE_COLOR + 1);
+    pn5180UnpackColorFlags(colp[3], out);
+    for (int i = 0; i < 3; i++) {
+      out.colorRgb[1][i] = colp[i];
+      out.colorRgb[2][i] = colp2[i];
+    }
+    uint8_t c0[3];
+    if (pn5180ParseColorHex(out.color, c0))
+      for (int i = 0; i < 3; i++) out.colorRgb[0][i] = c0[i];
+  }
 
   // Strings: gated on the commit-marker page's own sub-magic, same reasoning as
   // Mifare's block 36 -- numeric fields above are already valid (CRC checked) even if
@@ -2869,13 +3146,11 @@ inline bool pn5180ReadNtagExtended(SpoolTagData &out) {
   uint8_t *scanBuf = (uint8_t *)malloc(maxStrPages * 4);
   if (!scanBuf) return true;  // numeric fields already populated -- degrade gracefully
   bool gotAny = false;
-  int gotPages = 0;
   // Read in chunks (pn5180NtagReadPages handles >4 pages internally via multiple READs)
   // -- stop early once the marker is found to avoid reading past tag capacity.
   for (int chunk = 0; chunk < maxStrPages; chunk += 4) {
     int want = min(4, maxStrPages - chunk);
     if (!pn5180NtagReadPages(NTAG_EXT_PAGE_STR + chunk, want, scanBuf + chunk * 4)) break;
-    gotPages = chunk + want;
     gotAny = true;
     // Scan the newly-read chunk for the marker.
     for (int i = 0; i < want; i++) {
