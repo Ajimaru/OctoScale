@@ -26,10 +26,16 @@ FONT_SRC = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
 # Anything outside it renders as '?' via menuAsciiFallback() rather than the
 # white box TFT_eSPI draws for a missing glyph.
 #
+# The original glyph set also skipped a chunk of printable ASCII (quotes, brackets,
+# '_', '<'/'>', '{'/'}', '~', ...) -- fine until a spool name uses one, e.g. "tag_test",
+# which then hit the same missing-glyph white box. Add the full printable ASCII range
+# too so any punctuation in a name/vendor/material string renders instead of boxing.
+#
 # Only OctoFontMid gets these: OctoFontBig renders weights, tag types and UIDs
-# ("842.3 g", "NFC-A", hex UIDs) -- never user text -- so the 135 KB the same
+# ("842.3 g", "NFC-A", hex UIDs) -- never user text -- so the KB the same
 # extension would cost there buys nothing.
-ADD = "".join(chr(c) for c in range(0xA0, 0x100) if c != 0xAD)
+ADD = ("".join(chr(c) for c in range(0x20, 0x7F)) +
+       "".join(chr(c) for c in range(0xA0, 0x100) if c != 0xAD))
 EXTEND_ONLY = {"OctoFontMid"}
 
 
