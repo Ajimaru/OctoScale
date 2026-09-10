@@ -250,10 +250,16 @@ struct SpoolTagData {
   int firstUseMinuteOfDay = -1, lastUseMinuteOfDay = -1, purchasedOnMinuteOfDay = -1;
   float cost = -1;                          // 2 decimal places
 
-  // OpenPrintTag-only fields (spec keys 57/58/27). No octoscaleExtended layout carries
-  // these -- they are written to and read from OPT tags exclusively.
-  // dryingTime is in MINUTES, matching the spec's unit: the caller converts, so the
-  // value crossing this boundary is always the one that goes on the tag verbatim.
+  // Drying fields (OpenPrintTag spec keys 57/58) plus td (key 27). No octoscaleExtended
+  // layout carries any of them. OPT carries all three; TigerTag carries the two drying
+  // fields (bytes 28/29) but not td.
+  //
+  // dryingTime is in MINUTES everywhere on THIS side of the boundary -- the OPT spec
+  // unit, and what /nfcprobe reports and /nfcwritespool accepts. Per-layout conversion
+  // is the individual writer's job: OPT stores minutes verbatim, TigerTag's byte 29 is
+  // HOURS and divides (see pn5180WriteNtagTigerTag). Do not "simplify" that division
+  // away -- without it every TigerTag drying time is off by a factor of 60, which is
+  // exactly the bug that was measured on hardware (3h written -> 180 in byte 29).
   int dryingTemperature = -1;   // deg C
   int dryingTime = -1;          // minutes (spec unit; 8 h arrives here as 480)
   // Transmission distance: a DIMENSIONLESS opacity number (0.1 = most opaque,
@@ -2965,7 +2971,22 @@ inline bool pn5180WriteNtagTigerTag(const SpoolTagData &d, int &bytesWrittenOut,
   buf[24] = (uint8_t)(tMin >> 8); buf[25] = (uint8_t)tMin;
   buf[26] = (uint8_t)(tMax >> 8); buf[27] = (uint8_t)tMax;
   buf[28] = (d.dryingTemperature >= 0) ? (uint8_t)constrain(d.dryingTemperature, 0, 0xFF) : 0;
-  buf[29] = (d.dryingTime >= 0) ? (uint8_t)constrain(d.dryingTime, 0, 0xFF) : 0;
+  // dryingTime crosses this boundary in MINUTES (our internal unit, matching
+  // OpenPrintTag spec key 58), but TigerTag's byte 29 is HOURS -- verified against
+  // TigerTag's official spec/reference SDK via the SpoolManagerExtended peer, and
+  // measured on real hardware: writing 3h (=180 min) without this division put 180 in
+  // byte 29, which the plugin then read back as 180 HOURS (factor-60 error on every
+  // value, not just long ones). Rounded to nearest rather than truncated, so 90 min
+  // becomes 2h and not 1h. As a side effect this also retires the old clamp problem:
+  // in minutes a single byte capped at 255 (4h15), in hours 255h covers any real
+  // drying profile.
+  int dryHours = (d.dryingTime >= 0) ? (int)((d.dryingTime + 30) / 60) : -1;
+  // A set-but-short time (1..29 min) would round to 0, and 0 is this layout's
+  // "not set" -- the value would vanish silently on read-back. Floor it to 1h
+  // instead: wrong by under half an hour, but still visibly "there is a drying
+  // time", which beats losing it.
+  if (d.dryingTime > 0 && dryHours == 0) dryHours = 1;
+  buf[29] = (dryHours >= 0) ? (uint8_t)constrain(dryHours, 0, 0xFF) : 0;
   buf[30] = (d.bedTemperatureMin >= 0) ? (uint8_t)constrain(d.bedTemperatureMin, 0, 0xFF)
           : (d.bedTemperature >= 0)    ? (uint8_t)constrain(d.bedTemperature, 0, 0xFF) : 0;
   buf[31] = (d.bedTemperatureMax >= 0) ? (uint8_t)constrain(d.bedTemperatureMax, 0, 0xFF) : 0;
@@ -3030,7 +3051,7 @@ inline bool pn5180ReadNtagTigerTag(SpoolTagData &out) {
   out.temperatureMin = (tMin > 0) ? (int)tMin : -1;
   out.temperatureMax = (tMax > 0) ? (int)tMax : -1;
   out.dryingTemperature = (buf[28] > 0) ? (int)buf[28] : -1;
-  out.dryingTime = (buf[29] > 0) ? (int)buf[29] : -1;
+  out.dryingTime = (buf[29] > 0) ? (int)buf[29] * 60 : -1;  // byte is HOURS, our field is minutes
   out.bedTemperatureMin = (buf[30] > 0) ? (int)buf[30] : -1;
   out.bedTemperatureMax = (buf[31] > 0) ? (int)buf[31] : -1;
 

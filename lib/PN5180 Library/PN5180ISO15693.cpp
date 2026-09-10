@@ -22,6 +22,15 @@
 #include "PN5180ISO15693.h"
 #include "Debug.h"
 
+// OctoScale patch: bound for the "wait until the tag finished answering" loop in
+// issueISO15693Command(). Yields the CPU (delay(1)) while waiting, so a slow tag
+// costs latency, never a task-watchdog reboot.
+static const uint32_t ISO15693_RX_TIMEOUT_MS = 200;
+// Bound for the "has the tag started answering at all" wait. Must comfortably exceed a
+// tag's internal write/programming time (~4-6ms on ICODE parts, spec allows more), but
+// stay small: it is paid in full on every poll with no tag on the reader.
+static const uint32_t ISO15693_SOF_TIMEOUT_MS = 20;
+
 PN5180ISO15693::PN5180ISO15693(uint8_t SSpin, uint8_t BUSYpin, uint8_t RSTpin)
               : PN5180(SSpin, BUSYpin, RSTpin) {
 }
@@ -525,10 +534,49 @@ ISO15693ErrorCode PN5180ISO15693::issueISO15693Command(uint8_t *cmd, uint8_t cmd
 #endif
 
   sendData(cmd, cmdLen);
-  delay(10);
 
-  if (0 == (getIRQStatus() & RX_SOF_DET_IRQ_STAT)) {
-    return EC_NO_CARD;
+  // OctoScale patch (see lib/README-patch.md): this used to be a flat `delay(10)` followed
+  // by a single SOF check. A slower NFC-V tag is not done responding after 10ms, so its
+  // answer was discarded as EC_NO_CARD -- sporadic read failures with no error anywhere.
+  // Fix adopted from tueddy/PN5180-Library v2.3.7 (same fix is in upstream 1.8.1): wait
+  // for the reception-complete IRQ instead of guessing a delay.
+  //
+  // Order is load-bearing: the SOF check stays FIRST. "No tag in the field" is the normal
+  // case on every poll, and it must return EC_NO_CARD immediately -- waiting for RX_IRQ
+  // first would burn the full timeout on every single empty poll.
+  {
+    // Wait for the tag to START answering (SOF). This must be a WAIT, not a single
+    // check: a WRITE_SINGLE_BLOCK is only acknowledged after the tag has finished its
+    // internal programming cycle (~4-6ms on ICODE parts), so at t=0 the SOF flag is
+    // legitimately still clear even though a tag is sitting on the reader.
+    //
+    // Regression note -- do not "simplify" this back: an earlier version of this patch
+    // checked SOF once after delay(1) and returned EC_NO_CARD when it was clear. Reads
+    // still worked (the tag answers those in well under 1ms), but EVERY write failed
+    // with "write failed (block 0)" while the old flat delay(10) had worked. Verified by
+    // A/B-flashing the unpatched library against this one on the same tag.
+    //
+    // The no-tag case still costs only ISO15693_SOF_TIMEOUT_MS, which is why that bound
+    // is kept tight: it is paid on every empty poll of the 500ms cycle.
+    uint32_t rxIrq = getIRQStatus();
+    uint32_t t0 = millis();
+    while (0 == (rxIrq & RX_SOF_DET_IRQ_STAT)) {
+      if (millis() - t0 > ISO15693_SOF_TIMEOUT_MS) {
+        return EC_NO_CARD;  // nothing responded -- the normal "no tag in field" outcome
+      }
+      delay(1);
+      rxIrq = getIRQStatus();
+    }
+
+    // A tag has started answering -- now wait for the reception to actually complete.
+    t0 = millis();
+    while (0 == (rxIrq & RX_IRQ_STAT)) {
+      if (millis() - t0 > ISO15693_RX_TIMEOUT_MS) {
+        return EC_NO_CARD;  // treated as "nothing read" by every caller
+      }
+      delay(1);
+      rxIrq = getIRQStatus();
+    }
   }
 
   uint32_t rxStatus;

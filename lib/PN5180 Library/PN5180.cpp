@@ -37,6 +37,13 @@
 #define PN5180_RF_ON                    (0x16)
 #define PN5180_RF_OFF                   (0x17)
 
+// OctoScale patch: bound for the IRQ wait loops in setRF_on()/setRF_off()/reset().
+// These waits are a different kind from the BUSY-pin spin further down: they can
+// legitimately take milliseconds, and waitForIRQ() yields the CPU with delay(1) while
+// waiting -- so a generous bound is fine. Value matches tueddy/PN5180-Library's
+// commandTimeout default.
+static const uint32_t PN5180_IRQ_TIMEOUT_MS = 500;
+
 uint8_t PN5180::readBuffer[508];
 PN5180::MifareAuthDebugCb PN5180::mifareAuthDebugCb = nullptr;
 
@@ -406,6 +413,34 @@ bool PN5180::loadRFConfig(uint8_t txConf, uint8_t rxConf) {
 }
 
 /*
+ * OctoScale patch -- timeouts on the IRQ wait loops.
+ * See lib/README-patch.md. Upstream (and this 1.5 base) waits on IRQ_STATUS with plain
+ * `while (0 == (FLAG & getIRQStatus()));` loops in setRF_on(), setRF_off() and reset().
+ * If the chip never raises the flag (RF disturbance, brown-out, a tag loading the field,
+ * or the chip left in an unexpected state) those loops never return: on the ESP32 that
+ * starves the owning FreeRTOS task (pn5180Task, core 0) -> task watchdog -> hard reboot
+ * with no log, since there is no USB serial in normal operation.
+ *
+ * The timeout/retry approach below is adopted from the maintained fork
+ * tueddy/PN5180-Library v2.3.7 (https://github.com/tueddy/PN5180-Library), which is a
+ * fork of this same library and therefore under the same LGPL-2.1 licence. Re-expressed
+ * here as one shared helper rather than copied loop-by-loop, so the three call sites stay
+ * readable and consistent with the existing pn5180WaitBusy() patch above.
+ *
+ * delay(1) in the loop is load-bearing: unlike the BUSY-pin wait (a few microseconds,
+ * deliberately a tight spin at 50ms), these waits can legitimately last milliseconds, so
+ * the task must yield the CPU while waiting.
+ */
+bool PN5180::waitForIRQ(uint32_t irqMask, uint32_t timeoutMs) {
+  uint32_t t0 = millis();
+  while (0 == (irqMask & getIRQStatus())) {
+    if (millis() - t0 > timeoutMs) return false;
+    delay(1);
+  }
+  return true;
+}
+
+/*
  * RF_ON - 0x16
  * This command is used to switch on the internal RF field. If enabled the TX_RFON_IRQ is
  * set after the field is switched on.
@@ -419,7 +454,11 @@ bool PN5180::setRF_on() {
   transceiveCommand(cmd, 2);
   SPI.endTransaction();
 
-  while (0 == (TX_RFON_IRQ_STAT & getIRQStatus())); // wait for RF field to set up
+  // OctoScale patch: bounded wait (was an unguarded infinite loop) -- see waitForIRQ().
+  if (!waitForIRQ(TX_RFON_IRQ_STAT, PN5180_IRQ_TIMEOUT_MS)) {
+    PN5180DEBUG(F("*** ERROR: Set RF ON timeout\n"));
+    return false;
+  }
   clearIRQStatus(TX_RFON_IRQ_STAT);
   return true;
 }
@@ -438,7 +477,11 @@ bool PN5180::setRF_off() {
   transceiveCommand(cmd, 2);
   SPI.endTransaction();
 
-  while (0 == (TX_RFOFF_IRQ_STAT & getIRQStatus())); // wait for RF field to shut down
+  // OctoScale patch: bounded wait (was an unguarded infinite loop) -- see waitForIRQ().
+  if (!waitForIRQ(TX_RFOFF_IRQ_STAT, PN5180_IRQ_TIMEOUT_MS)) {
+    PN5180DEBUG(F("*** ERROR: Set RF OFF timeout\n"));
+    return false;
+  }
   clearIRQStatus(TX_RFOFF_IRQ_STAT);
   return true;
 }
@@ -561,7 +604,23 @@ void PN5180::reset() {
   digitalWrite(PN5180_RST, HIGH); // 2ms to ramp up required
   delay(10);
 
-  while (0 == (IDLE_IRQ_STAT & getIRQStatus())); // wait for system to start up
+  // OctoScale patch: bounded wait (was an unguarded infinite loop) -- see waitForIRQ().
+  // reset() is by far the most-called entry point of this library in OctoScale (~60 call
+  // sites, all on core 0), so this was the single most dangerous of the three spins.
+  // Retry-once-with-longer-timings behaviour adopted from tueddy/PN5180-Library v2.3.7.
+  // Signature stays void: every caller treats reset() as fire-and-forget, and a failed
+  // reset surfaces on the next command anyway (which now times out instead of hanging).
+  if (!waitForIRQ(IDLE_IRQ_STAT, PN5180_IRQ_TIMEOUT_MS)) {
+    PN5180DEBUG(F("*** ERROR: reset failed (timeout), retrying with longer timings\n"));
+    digitalWrite(PN5180_RST, LOW);
+    delay(10);
+    digitalWrite(PN5180_RST, HIGH);
+    delay(50);
+    if (!waitForIRQ(IDLE_IRQ_STAT, PN5180_IRQ_TIMEOUT_MS)) {
+      PN5180DEBUG(F("*** ERROR: reset failed (timeout) after retry\n"));
+      return;  // give up -- do NOT spin forever
+    }
+  }
 
   clearIRQStatus(0xffffffff); // clear all flags
 }

@@ -444,6 +444,7 @@ Printable parts live in `stl_files/`:
 | `OctoScaleKnobCover.stl` | 1 | cap for the EC11 encoder shaft (13.5 mm ⌀, 5.2 mm tall) | same |
 | `OctoScaleButtonCover.stl` | 1 | button cap (13.5 mm ⌀, 1.8 mm tall) | same |
 | `OctoScaleSpacer.stl` | 10 | washer-style spacer (5.5 × 5.5 × 3.5 mm) under every screw | same |
+| `OctoScaleLEDCover.stl` | 1 | light window over the status LED opening (7 × 7 × 1.4 mm) | **transparent filament**, 0.2 mm layers, 0.25 mm first layer, **99.99 % infill** |
 
 **Spacers:** the printed parts are too thin for the screws to bite on their own, so a
 spacer goes on top of each mounting point before its screw. Order per point: printed
@@ -457,6 +458,11 @@ The one exception is the **WS2812 status LED**, which has no seat of its own —
 front. Its position is obvious once the lid is in hand. Glue it *after* soldering its
 three wires, and check the LED lights before the lid goes on: once it's glued, it does
 not come off.
+
+`OctoScaleLEDCover.stl` closes that opening from the outside and diffuses the LED, so
+print it in **transparent filament** — in any opaque colour it defeats its own purpose.
+The near-solid infill (99.99 %) is what makes it come out clear instead of cloudy: sparse
+infill leaves internal air gaps that scatter the light.
 
 ## Build & flash
 

@@ -141,6 +141,12 @@ public:
 private:
   bool transceiveCommand(uint8_t *sendBuffer, size_t sendBufferLen, uint8_t *recvBuffer = 0, size_t recvBufferLen = 0);
 
+  // OctoScale patch (see lib/README-patch.md, "Timeouts on the IRQ wait loops").
+  // Polls IRQ_STATUS until every bit in irqMask is set. Returns false on timeout
+  // instead of spinning forever. delay(1) inside the loop is deliberate: it yields
+  // the CPU so the FreeRTOS task on core 0 keeps feeding the task watchdog.
+  bool waitForIRQ(uint32_t irqMask, uint32_t timeoutMs);
+
 };
 
 #endif /* PN5180_H */
