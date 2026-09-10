@@ -77,7 +77,7 @@ static const uint8_t MIFARE_EXT_MAGIC1 = 'S';
 // of block 8's) so a v3 reader can tell "v3 fields genuinely present and intact" apart
 // from "v3 version byte was set but the write was cut off before the new blocks
 // landed" -- block 8 is still written LAST overall, same discipline as v1/v2.
-static const uint8_t MIFARE_EXT_VERSION = 0x04;  // v4: multi-colour in block 10[2..8]
+static const uint8_t MIFARE_EXT_VERSION = 0x05;  // v5: drying/td in block 17[6..11] (v4: multi-colour in block 10[2..8])
 static const uint8_t MIFARE_EXT_BLOCK8  = 8;
 static const uint8_t MIFARE_EXT_BLOCK9  = 9;
 static const uint8_t MIFARE_EXT_BLOCK10 = 10;  // v2+: [0] bed temp min [1] bed temp max
@@ -89,7 +89,9 @@ static const uint8_t MIFARE_EXT_BLOCK16 = 16;   // v3: sector 4, 7 packed numeri
 // Block 16 is packed full (all 16 bytes), so the minute-of-day companions for
 // firstUse/lastUse/purchasedOn get block 17 -- same sector, so it rides along on the
 // auth block 16 already did, no extra Crypto1 round.
-static const uint8_t MIFARE_EXT_BLOCK17 = 17;   // v3: 3x minute-of-day (uint16 LE) + reserved
+static const uint8_t MIFARE_EXT_BLOCK17 = 17;   // v3: 3x minute-of-day (uint16 LE);
+                                               // v5: +6 dryTemp u8, +7 pad, +8 dryTime u16 LE,
+                                               // +10 td x100 u16 LE, +12..15 reserved 0x00
 // v3 string buffer: sectors 5-8, 12 contiguous data blocks treated as one flat
 // 192-byte length-prefixed buffer (same [1-byte len][UTF-8 bytes] convention as the
 // existing 3-string block above, just longer/more records). Block numbers skip each
@@ -117,7 +119,7 @@ static const uint8_t MIFARE_EXT_BLOCK36 = 36;   // v3: sector 9, commit marker
 //   Block 23 (4 B, v2+): [0] bed temp min (uint8) [1] bed temp max (uint8) [2-3] reserved
 static const uint8_t NFCV_EXT_MAGIC0 = 'O';
 static const uint8_t NFCV_EXT_MAGIC1 = 'S';
-static const uint8_t NFCV_EXT_VERSION = 0x03;  // v3: multi-colour in blocks 24-25
+static const uint8_t NFCV_EXT_VERSION = 0x04;  // v4: drying/td in blocks 26-27 (v3: multi-colour in blocks 24-25)
 static const uint8_t NFCV_EXT_BLOCK_START = 3;   // magic/version/flags/dbId: blocks 3-4
 static const uint8_t NFCV_EXT_BLOCK_NUM   = 5;   // weights/density: blocks 5-6
 static const uint8_t NFCV_EXT_BLOCK_PHYS  = 7;   // diameter/temps/rgb/crc: blocks 7-10
@@ -130,6 +132,10 @@ static const uint8_t NFCV_EXT_BLOCK_TEMPRANGE = 23;  // v2+: bed temp min/max (4
 // physBuf where it always was.
 static const uint8_t NFCV_EXT_BLOCK_COLOR = 24;   // [0..2] colour 2, [3] flags
                                                   // block 25: [0..2] colour 3, [3] reserved
+// v4: drying/td. Strings live in blocks 11-22, i.e. BEFORE these -- unlike NTAG, adding
+// them shifts nothing, so no existing field can be misread if a writer gets it wrong.
+static const uint8_t NFCV_EXT_BLOCK_DRY = 26;    // [0] dryTemp u8, [1] pad, [2..3] dryTime u16 LE
+                                                  // block 27: [0..1] td x100 u16 LE, [2..3] reserved
 static const uint8_t NFCV_BLOCK_SIZE = 4;
 
 // --- NTAG Extended layout (NTAG215/216 only -- 213's ~144 B usable can't fit the v3
@@ -165,7 +171,7 @@ static const uint8_t NFCV_BLOCK_SIZE = 4;
 //                       only, no strings" (commit marker missing/incomplete).
 static const uint8_t NTAG_EXT_MAGIC0 = 'O';
 static const uint8_t NTAG_EXT_MAGIC1 = 'X';
-static const uint8_t NTAG_EXT_VERSION = 0x02;  // v2: multi-colour on pages 19-20
+static const uint8_t NTAG_EXT_VERSION = 0x03;  // v3: drying/td on pages 21-22 (v2: multi-colour on pages 19-20)
 static const uint8_t NTAG_EXT_PAGE_START = 4;    // magic/version/flags/dbId: pages 4-5
 static const uint8_t NTAG_EXT_PAGE_NUM   = 6;    // totalWeight/spoolWeight/usedWeight/remainingWeight: pages 6-7
 static const uint8_t NTAG_EXT_PAGE_DENSITY = 8;  // density+diameter: page 8
@@ -176,7 +182,14 @@ static const uint8_t NTAG_EXT_PAGE_LEN   = 14;   // totalLength/usedLength/cost/
 static const uint8_t NTAG_EXT_PAGE_DATES = 17;   // lastUse/purchasedOn: pages 17-18
 static const uint8_t NTAG_EXT_PAGE_COLOR = 19;  // v2: [0..2] colour 2, [3] flags
                                                 // page 20: [0..2] colour 3, [3] reserved
-static const uint8_t NTAG_EXT_PAGE_STR   = 21;  // strings start here (was 19 pre-v2)
+// v3: pages 21-22 carry drying/td, so the string buffer moves 21 -> 23. This constant is
+// the single source of truth for that boundary -- fixedBuf's size, the string budget, the
+// pad loop and the commit-marker scan are all derived from it, so moving it moves them
+// all together. Leaving strings at 21 while writing v3 would produce a complete,
+// valid-LOOKING tag with the drying bytes read back as vendor/material.
+static const uint8_t NTAG_EXT_PAGE_STR   = 23;  // strings start here (19 pre-v2, 21 in v2)
+static const uint8_t NTAG_EXT_PAGE_DRY   = 21;  // v3: [0] dryTemp u8, [1] pad, [2..3] dryTime u16 LE
+                                                //     page 22: [0..1] td x100 u16 LE, [2..3] reserved
 static const uint8_t NTAG_EXT_MAGIC2_0 = 'N';    // commit marker sub-magic (last page)
 static const uint8_t NTAG_EXT_MAGIC2_1 = 'X';
 // CRC coverage: pages 4-12 (36 B) + page 13's own first byte position is the CRC
@@ -1684,6 +1697,42 @@ inline int pn5180UnscaleMinuteOfDay(uint16_t raw) {
   return (raw <= 1439) ? (int)raw : -1;  // 0xFFFF and any junk -> not set
 }
 
+// --- v5 drying/td field codecs (shared by ALL THREE Extended carriers) -------------
+// Layout agreed with SpoolManagerExtended: dryingTemperature u8 (0xFF = not set),
+// dryingTime u16 LE in MINUTES (0xFFFF), td u16 LE scaled x100 (0xFFFF).
+//
+// dryingTime deliberately stays in MINUTES on the tag -- our whole API speaks minutes
+// (OpenPrintTag spec key 58, /nfcprobe, /nfcwritespool), and every carrier here has room
+// for a u16, so there is no reason to convert. That is the direct lesson from TigerTag's
+// single hour-byte, where the missing division cost a factor of 60 (see the unit trap in
+// lib/../HARDWARE.md). One encode/decode pair, used by all three writers and readers --
+// do not open-code these at the call sites.
+inline uint8_t pn5180DryTempU8(int degC) {
+  return (degC >= 0 && degC <= 0xFE) ? (uint8_t)degC : 0xFF;
+}
+inline int pn5180UnscaleDryTemp(uint8_t raw) {
+  return (raw == 0xFF) ? -1 : (int)raw;
+}
+inline uint16_t pn5180DryTimeU16(int minutes) {
+  return (minutes >= 0 && minutes <= 0xFFFE) ? (uint16_t)minutes : 0xFFFF;
+}
+inline int pn5180UnscaleDryTime(uint16_t raw) {
+  return (raw == 0xFFFF) ? -1 : (int)raw;
+}
+// td is a dimensionless opacity number (0.1 = most opaque .. 100 = most transparent),
+// stored x100 so one decimal survives. Never label it mm.
+inline uint16_t pn5180TdU16(float td) {
+  if (td < 0) return 0xFFFF;
+  long scaled = lroundf(td * 100.0f);
+  return (scaled >= 0 && scaled <= 0xFFFE) ? (uint16_t)scaled : 0xFFFF;
+}
+inline float pn5180UnscaleTd(uint16_t raw) {
+  return (raw == 0xFFFF) ? -1.0f : (float)raw / 100.0f;
+}
+// Little-endian u16 helpers -- the v5 fields are LE on every carrier.
+inline void pn5180PutU16LE(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v & 0xFF); p[1] = (uint8_t)(v >> 8); }
+inline uint16_t pn5180GetU16LE(const uint8_t *p) { return (uint16_t)(p[0] | ((uint16_t)p[1] << 8)); }
+
 inline uint16_t pn5180ScaleU16(float v, float scale, uint16_t notSet = 0xFFFF) {
   if (v < 0) return notSet;
   long scaled = lroundf(v * scale);
@@ -1885,6 +1934,12 @@ inline bool pn5180WriteMifareExtended(const String &uidHex, const SpoolTagData &
   block17[0] = (uint8_t)(fuM & 0xFF); block17[1] = (uint8_t)(fuM >> 8);
   block17[2] = (uint8_t)(luM & 0xFF); block17[3] = (uint8_t)(luM >> 8);
   block17[4] = (uint8_t)(poM & 0xFF); block17[5] = (uint8_t)(poM >> 8);
+  // v5: drying/td in the previously unused tail. Byte 7 is a deliberate pad so both
+  // u16s land 2-byte aligned and a u8 slot stays free. Bytes 12-15 stay 0x00 (the
+  // buffer is zero-initialised) -- reserved, NOT 0xFF, per the agreed layout.
+  block17[6] = pn5180DryTempU8(d.dryingTemperature);
+  pn5180PutU16LE(&block17[8],  pn5180DryTimeU16(d.dryingTime));
+  pn5180PutU16LE(&block17[10], pn5180TdU16(d.td));
   if (!pn5180MifareWriteBlock(MIFARE_EXT_BLOCK17, block17, errOut)) {
     g_pn5180->reset(); g_pn5180->setupRF();
     return false;
@@ -1994,6 +2049,7 @@ inline bool pn5180ReadMifareExtended(const String &uidHex, SpoolTagData &out) {
   bool isV2 = block8[2] >= 0x02;
   bool isV3 = block8[2] >= 0x03;
   bool isV4 = block8[2] >= 0x04;
+  bool isV5 = block8[2] >= 0x05;
   uint8_t block10[16] = {0};
   if (isV2 && !pn5180MifareReadBlock(MIFARE_EXT_BLOCK10, block10)) return false;
   uint8_t block16[16] = {0};
@@ -2075,6 +2131,15 @@ inline bool pn5180ReadMifareExtended(const String &uidHex, SpoolTagData &out) {
       out.firstUseMinuteOfDay = pn5180UnscaleMinuteOfDay((uint16_t)(block17[0] | (block17[1] << 8)));
       out.lastUseMinuteOfDay = pn5180UnscaleMinuteOfDay((uint16_t)(block17[2] | (block17[3] << 8)));
       out.purchasedOnMinuteOfDay = pn5180UnscaleMinuteOfDay((uint16_t)(block17[4] | (block17[5] << 8)));
+      // v5 only: on a v3/v4 tag these bytes are whatever the writer left there (0x00 from
+      // the zero-init), and 0x00 is NOT the not-set sentinel here -- decoding them
+      // unconditionally would invent a 0 °C / 0 min drying spec on every older tag and
+      // overwrite the spool's real values on import. Gate strictly on the version byte.
+      if (isV5) {
+        out.dryingTemperature = pn5180UnscaleDryTemp(block17[6]);
+        out.dryingTime = pn5180UnscaleDryTime(pn5180GetU16LE(&block17[8]));
+        out.td = pn5180UnscaleTd(pn5180GetU16LE(&block17[10]));
+      }
     }
   }
 
@@ -2579,6 +2644,18 @@ inline bool pn5180WriteNfcvExtended(const uint8_t uid[8], const SpoolTagData &d,
   colBuf[3] = pn5180PackColorFlags(d);
   if (!pn5180NfcvWriteBlock(uid, NFCV_EXT_BLOCK_COLOR, colBuf, errOut)) return false;
   if (!pn5180NfcvWriteBlock(uid, NFCV_EXT_BLOCK_COLOR + 1, col2Buf, errOut)) return false;
+
+  // v4 drying/td, blocks 26-27. Written before the magic block, like everything else,
+  // so an interrupted write never leaves a tag claiming v4 without these present.
+  // Reserved bytes stay 0x00 (not 0xFF, which is the not-set sentinel).
+  uint8_t dryBuf[NFCV_BLOCK_SIZE] = {0};
+  uint8_t dryBuf2[NFCV_BLOCK_SIZE] = {0};
+  dryBuf[0] = pn5180DryTempU8(d.dryingTemperature);
+  dryBuf[1] = 0;  // pad, keeps the u16 2-byte aligned
+  pn5180PutU16LE(&dryBuf[2], pn5180DryTimeU16(d.dryingTime));
+  pn5180PutU16LE(&dryBuf2[0], pn5180TdU16(d.td));
+  if (!pn5180NfcvWriteBlock(uid, NFCV_EXT_BLOCK_DRY, dryBuf, errOut)) return false;
+  if (!pn5180NfcvWriteBlock(uid, NFCV_EXT_BLOCK_DRY + 1, dryBuf2, errOut)) return false;
   bytesWrittenOut += 8;
   bytesWrittenOut += 4;
 
@@ -2619,6 +2696,15 @@ inline bool pn5180ReadNfcvExtended(const uint8_t uid[8], SpoolTagData &out) {
     if (!pn5180NfcvReadBlock(uid, NFCV_EXT_BLOCK_COLOR + 1, col2Buf)) return false;
   }
   bool haveCol = isV3nfcv;
+  // v4 drying/td blocks. Same version gate: on a v3 tag blocks 26-27 were never written
+  // and hold whatever the tag shipped with, so decoding them unconditionally could
+  // invent a drying spec out of factory bytes.
+  uint8_t dryBuf[4] = {0}, dryBuf2[4] = {0};
+  bool isV4nfcv = magicBuf[2] >= 0x04;
+  if (isV4nfcv) {
+    if (!pn5180NfcvReadBlock(uid, NFCV_EXT_BLOCK_DRY, dryBuf)) return false;
+    if (!pn5180NfcvReadBlock(uid, NFCV_EXT_BLOCK_DRY + 1, dryBuf2)) return false;
+  }
 
   uint8_t crcBuf[33];
   memcpy(crcBuf, magicBuf, 8);
@@ -2665,6 +2751,12 @@ inline bool pn5180ReadNfcvExtended(const uint8_t uid[8], SpoolTagData &out) {
     uint8_t c0[3];
     if (pn5180ParseColorHex(out.color, c0))
       for (int i = 0; i < 3; i++) out.colorRgb[0][i] = c0[i];
+  }
+
+  if (isV4nfcv) {
+    out.dryingTemperature = pn5180UnscaleDryTemp(dryBuf[0]);
+    out.dryingTime = pn5180UnscaleDryTime(pn5180GetU16LE(&dryBuf[2]));
+    out.td = pn5180UnscaleTd(pn5180GetU16LE(&dryBuf2[0]));
   }
 
   bool hasStrings = (magicBuf[3] & 0x01) != 0;
@@ -2857,6 +2949,17 @@ inline bool pn5180WriteNtagExtended(const SpoolTagData &d, int &bytesWrittenOut,
   colp2[3] = 0;  // reserved
   datesp2[0] = (uint8_t)(luM & 0xFF); datesp2[1] = (uint8_t)(luM >> 8);
   datesp2[2] = (uint8_t)(poM & 0xFF); datesp2[3] = (uint8_t)(poM >> 8);
+
+  // v3 drying/td, pages 21-22. Like the colour pages above these live inside the fixed
+  // region, so they ride along on the same write loop. Page 22[2..3] stays 0x00
+  // (reserved, zero-initialised buffer) -- not 0xFF, which is the not-set sentinel.
+  uint8_t *dryp = fp(NTAG_EXT_PAGE_DRY);
+  uint8_t *dryp2 = fp(NTAG_EXT_PAGE_DRY + 1);
+  dryp[0] = pn5180DryTempU8(d.dryingTemperature);
+  dryp[1] = 0;  // pad, keeps the u16 below 2-byte aligned
+  pn5180PutU16LE(&dryp[2], pn5180DryTimeU16(d.dryingTime));
+  pn5180PutU16LE(&dryp2[0], pn5180TdU16(d.td));
+  dryp2[2] = 0; dryp2[3] = 0;  // reserved
 
   // --- Write: fixed pages first, then strings, commit-marker page LAST -- same "an
   // aborted write never reads back as corrupt" discipline as every other Extended
@@ -3153,6 +3256,18 @@ inline bool pn5180ReadNtagExtended(SpoolTagData &out) {
     uint8_t c0[3];
     if (pn5180ParseColorHex(out.color, c0))
       for (int i = 0; i < 3; i++) out.colorRgb[0][i] = c0[i];
+  }
+
+  // v3 drying/td, pages 21-22. Version-gated for the same reason as the colours above,
+  // only sharper: on a v2 tag those pages are the first two STRING pages, so decoding
+  // them unconditionally would turn UTF-8 vendor bytes into a drying temperature. On a
+  // v1 tag they are string pages too -- only a v3 tag has real values there.
+  if (fixedBuf[2] >= 0x03) {
+    uint8_t *dryp = fp(NTAG_EXT_PAGE_DRY);
+    uint8_t *dryp2 = fp(NTAG_EXT_PAGE_DRY + 1);
+    out.dryingTemperature = pn5180UnscaleDryTemp(dryp[0]);
+    out.dryingTime = pn5180UnscaleDryTime(pn5180GetU16LE(&dryp[2]));
+    out.td = pn5180UnscaleTd(pn5180GetU16LE(&dryp2[0]));
   }
 
   // Strings: gated on the commit-marker page's own sub-magic, same reasoning as

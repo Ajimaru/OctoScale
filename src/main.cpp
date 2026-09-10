@@ -468,16 +468,20 @@ static String nfcWriteUnsupportedFields(const SpoolTagData &d, const String &for
   String out;
   auto add = [&](const char *name) { if (out.length()) out += ","; out += name; };
 
-  // Drying data and opacity live only in OpenPrintTag (spec keys 57/58/27). Every other
-  // format silently has nowhere to put them -- which is exactly the case that prompted
-  // this function: a successful write plus three values quietly left behind.
-  if (format != "nfcvOpenPrintTag" && format != "tigerTag") {
+  // Drying data and opacity: OpenPrintTag has all three (spec keys 57/58/27), tigerTag
+  // has the two drying fields but not td, and since the Extended v5/v3/v4 layouts all
+  // three Extended carriers have all three too. What is left below genuinely has
+  // nowhere to put them -- which is the case that prompted this function: a successful
+  // write plus values quietly left behind.
+  bool extHasDrying = (format == "octoscaleExtended" || format == "ntagExtended" ||
+                       format == "nfcvExtended");
+  if (format != "nfcvOpenPrintTag" && format != "tigerTag" && !extHasDrying) {
     if (d.dryingTemperature >= 0) add("dryingTemperature");
     if (d.dryingTime >= 0) add("dryingTime");
   }
   // tigerTag stores dryingTemperature/dryingTime (bytes 28/29) but not td -- see
-  // pn5180WriteNtagTigerTag.
-  if (format != "nfcvOpenPrintTag" && d.td >= 0) add("td");
+  // pn5180WriteNtagTigerTag. The Extended layouts do carry td.
+  if (format != "nfcvOpenPrintTag" && !extHasDrying && d.td >= 0) add("td");
   // OpenSpool carries a fixed 12-key JSON schema; everything below has no key there.
   // (OpenPrintTag's own gaps are not enumerated here -- it takes the widest field set
   // of all our formats, and its misses are the spec's, not a layout limitation.)
