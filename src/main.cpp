@@ -21,6 +21,7 @@
 #include <ArduinoOTA.h>
 #include <Update.h>
 #include <HTTPUpdate.h>       // URL-based OTA (/updateurl)
+#include <WiFiClientSecure.h>
 #include <HX711.h>
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
@@ -2714,19 +2715,28 @@ void startWebServer() {
   server.on("/updateurl", HTTP_POST, []() {
     String url = server.arg("url");
     url.trim();
-    if (!url.startsWith("http://")) {
-      server.send(400, "text/plain", "url missing or not http://");
+    bool isHttps = url.startsWith("https://");
+    if (!url.startsWith("http://") && !isHttps) {
+      server.send(400, "text/plain", "url missing or not http:// or https://");
       return;
     }
     Serial.printf("URL OTA: %s\n", url.c_str());
     httpUpdate.rebootOnUpdate(false);  // we reboot ourselves AFTER the response
+    httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
     g_otaProgressPct = 0;
     g_otaInProgress = true;  // pn5180Task locks the TFT/encoder on the next tick
     httpUpdate.onProgress([](int done, int total) {
       g_otaProgressPct = total ? (uint8_t)((done * 100) / total) : 0;
     });
-    WiFiClient cli;
-    t_httpUpdate_return ret = httpUpdate.update(cli, url);
+    t_httpUpdate_return ret;
+    if (isHttps) {
+      WiFiClientSecure cli;
+      cli.setInsecure();
+      ret = httpUpdate.update(cli, url);
+    } else {
+      WiFiClient cli;
+      ret = httpUpdate.update(cli, url);
+    }
     g_otaInProgress = false;
     if (ret == HTTP_UPDATE_OK) {
       server.send(200, "text/plain", "Update OK - restarting");
