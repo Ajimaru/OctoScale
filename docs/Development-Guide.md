@@ -127,6 +127,27 @@ The TFT has four important takeover screens: the boot splash, the idle logo scre
 
 The optional web debug console is an in-RAM ring buffer intended to replace serial monitoring when the device runs from external power. Logging is inert while disabled. Keep the buffer bounded and avoid serializing it when free heap is low: `/debuglog` should fail clearly rather than allocating a second large contiguous JSON string and taking down the web server. High-frequency traces, such as repeated successful Mifare authentication or unchanged weight readings, must be gated or rate-limited. Prefer chunked streaming if substantially more history is ever needed.
 
+## WebUI polling and tab ownership
+
+The WebUI is embedded in `src/web_ui.h`. Periodic status requests are owned by the tab that displays their data. The `currentTab` guard prevents hidden panels from polling, and the browser visibility guard stops all periodic requests while the page is hidden. Selecting a tab triggers one immediate refresh; the regular timer then continues only while that tab remains active.
+
+| Tab | Endpoint | Interval |
+| --- | --- | ---: |
+| Operate | `/weight` | 500 ms |
+| Operate | `/flow/status` | 800 ms |
+| NFC | `/nfc5180` and `/flow/status` | 700 ms |
+| Scale | `/scaleinfo` | 1000 ms |
+| Setup | `/wifi/status` | 5000 ms |
+| System | `/system` | 3000 ms |
+| Debug | `/nfcdebug` | 700 ms |
+| Debug diagnostics | `/nfc5180`, `/scaleinfo`, `/weight` | 1000 ms |
+
+The Debug tab has two additional conditional loops. The menu preview polls `/menupreview` every 300 ms only while the preview is active. The debug console polls `/debuglog` every 500 ms only while debug logging is enabled. These loops stop when the Debug tab is left or the browser page is hidden.
+
+The intervals are intentionally different: live weight and flow state need responsive updates on Operate, while WiFi and system metrics can use a lower rate. Avoid adding a global timer for a panel-specific endpoint. Add the endpoint to the owning tab's `tabRefresh()` path and wrap its periodic callback with `pv(callback, tabId)` so it cannot continue polling in the background.
+
+The page also performs one-shot requests during startup and user actions, such as loading `/factor`, `/display`, `/led`, `/buzzer`, `/db/get`, and OctoPrint configuration. These are not periodic status polls and should remain tied to the relevant initialization or action unless a new live status requirement is introduced.
+
 ## Spool flow architecture
 
 The UI-independent flow is:

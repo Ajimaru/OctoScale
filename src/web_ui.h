@@ -715,10 +715,11 @@ static const char INDEX_HTML[] PROGMEM =
 
     "<script>"
     // ---- Tabs + Theme ----
-    "var fwInfo={available:false,latestVersion:'',releaseUrl:'',error:''};var fwOnlineEnabled=false;"
+    "var currentTab='betrieb';var fwInfo={available:false,latestVersion:'',releaseUrl:'',error:''};var fwOnlineEnabled=false;"
     "function tab(btn,id){document.querySelectorAll('nav button').forEach(function(b){"
     "b.setAttribute('aria-selected',b===btn);});"
     "document.querySelectorAll('.panel').forEach(function(p){p.classList.toggle('active',p.id===id);});"
+    "currentTab=id;tabRefresh(id);"
     "if(id==='system'&&fwOnlineEnabled)fwupd();}"
     "function gotoTab(id){var b=document.querySelector(\"nav button[onclick*=\\\"'\"+id+\"'\\\"]\");if(b)tab(b,id);}"
     // Theme = skin (OctoScale/OctoPrint palette+shapes) x mode (light/dark). Both
@@ -1189,7 +1190,7 @@ static const char INDEX_HTML[] PROGMEM =
     "mpvApply(o);"
     // Self-chaining poll while active (mirrors dbgpoll) -- picks up the device-side
     // stop (knob press) so the web UI switch doesn't lie about the real state.
-    "if(o.active&&!document.hidden){mpvTimer=setTimeout(mpvpoll,300);}});}"
+    "if(o.active&&!document.hidden&&currentTab==='debug'){mpvTimer=setTimeout(mpvpoll,300);}});}"
     "function mpvset(cb){var on=cb.checked?1:0;"
     "fetch('/menupreview?on='+on).then(r=>r.json()).then(o=>{mpvApply(o);"
     "if(o.active){clearTimeout(mpvTimer);mpvpoll();}});}"
@@ -1209,7 +1210,7 @@ static const char INDEX_HTML[] PROGMEM =
     "document.getElementById('dgscaleready').textContent=o.ready?'ready':'not ready';});"
     "fetch('/weight').then(r=>r.text()).then(function(t){"
     "document.getElementById('dgweight').textContent=t+' g';});"
-    "if(!document.hidden)dgTimer=setTimeout(dgpoll,1000);}"
+    "if(!document.hidden&&currentTab==='debug')dgTimer=setTimeout(dgpoll,1000);}"
     // Auto-cycle: a plain client-side setInterval calling the existing ?next=1 step
     // endpoint -- no new firmware endpoint needed, this just automates the same knob
     // action a person would do by hand.
@@ -1420,7 +1421,14 @@ static const char INDEX_HTML[] PROGMEM =
     // idle well under 15%), but it's pointless WiFi traffic and airtime. Coming back
     // to the tab fires one immediate refresh so the page is current right away
     // rather than showing stale values until the next interval elapses.
-    "function pv(f){return function(){if(!document.hidden)f();};}"
+    "function pv(f,id){return function(){if(!document.hidden&&currentTab===id)f();};}"
+    "function tabRefresh(id){if(document.hidden)return;"
+    "if(id==='betrieb'){wpoll();fpoll();}"
+    "else if(id==='nfc'){upN();}"
+    "else if(id==='scale'){scpoll();}"
+    "else if(id==='setup'){wifiupd();}"
+    "else if(id==='system'){sysupd();}"
+    "else if(id==='debug'){ndbg();dbgload();mpvpoll();dgpoll();}}"
     "function wpoll(){fetch('/weight').then(r=>r.text())"
     ".then(t=>document.getElementById('w').textContent=t);}"
     // ---- HX711 diagnostics (Scale tab) ----
@@ -1435,12 +1443,10 @@ static const char INDEX_HTML[] PROGMEM =
     "document.getElementById('scnoise').textContent=s.noiseStdDev===null?'--- (warming up)':"
     "(Number(s.noiseStdDev).toFixed(1)+' counts ('+s.noiseSamples+' samples)');"
     "});}"
-    "setInterval(pv(wpoll),500);"
-    "setInterval(pv(upN),700);setInterval(pv(fpoll),800);setInterval(pv(wifiupd),5000);"
-    "setInterval(pv(sysupd),3000);setInterval(pv(ndbg),700);setInterval(pv(scpoll),1000);"
+    "setInterval(pv(wpoll,'betrieb'),500);"
+    "setInterval(pv(upN,'nfc'),700);setInterval(pv(fpoll,'betrieb'),800);setInterval(pv(wifiupd,'setup'),5000);"
+    "setInterval(pv(sysupd,'system'),3000);setInterval(pv(ndbg,'debug'),700);setInterval(pv(scpoll,'scale'),1000);"
     "document.addEventListener('visibilitychange',function(){if(!document.hidden){"
-    "wpoll();upN();fpoll();wifiupd();sysupd();ndbg();scpoll();"
-    // dbgpoll's setTimeout chain stops itself while hidden (see dbgpoll) -> restart it.
-    "var cb=document.getElementById('dbge');if(cb&&cb.checked)dbgpoll();}});"
-    "themeInit();upF();upN();fpoll();octol();dbload();wifiupd();sysupd();tmload();ndbg();blload();ldload();bzload();dbgload();mpvpoll();dgpoll();</script>"
+    "tabRefresh(currentTab);}});"
+    "themeInit();upF();wpoll();fpoll();octol();dbload();tmload();blload();ldload();bzload();</script>"
     "</body></html>";
