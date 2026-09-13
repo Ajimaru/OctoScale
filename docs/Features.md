@@ -39,3 +39,5 @@ Foreign tags such as Snapmaker U1 tags fall back to a UID lookup in SpoolManager
 - OTA through `espota` or web upload/URL update.
 - Multiple OctoPrint instances with database failover when instances share an external database.
 - AES-256-CBC encrypted JSON configuration backup; API keys are never exported in plaintext.
+
+Continue with the [Hardware & Printing Guide](https://github.com/Ajimaru/OctoScale/wiki/Hardware-and-Printing-Guide) to gather components and print the enclosure parts.

@@ -42,7 +42,9 @@ It also supports standalone weighing and NFC tag read/write operations, OTA upda
 The complete build and maintenance documentation is in the Assembly Guide:
 
 - [OctoScale Features](https://github.com/Ajimaru/OctoScale/wiki/Features) — supported scale, NFC, interface, connectivity, OTA, and backup features.
-- [OctoScale Assembly Guide](https://github.com/Ajimaru/OctoScale/wiki/Assembly-Guide) — features, hardware BOM, wiring, enclosure, build and flash, first-time setup, project layout, and contributing.
+- [Hardware & Printing Guide](https://github.com/Ajimaru/OctoScale/wiki/Hardware-and-Printing-Guide) — hardware BOM and printable enclosure parts.
+- [OctoScale Assembly Guide](https://github.com/Ajimaru/OctoScale/wiki/Assembly-Guide) — wiring, enclosure assembly, project layout, and core/task notes.
+- [Setup Guide](https://github.com/Ajimaru/OctoScale/wiki/Setup-Guide) — firmware flash, OTA updates, and first-time setup.
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)

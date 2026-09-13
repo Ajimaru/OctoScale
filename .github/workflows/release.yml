@@ -1,0 +1,75 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate tag version
+        shell: bash
+        run: |
+          firmware_version="$(sed -n 's/^#define FW_VERSION "\([^"]*\)"/\1/p' src/version.h)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          [[ "$firmware_version" == "$tag_version" ]] || {
+            echo "Tag $GITHUB_REF_NAME does not match FW_VERSION $firmware_version"
+            exit 1
+          }
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build firmware
+        run: pio run -e esp32s3
+
+      - name: Create release images
+        shell: bash
+        run: |
+          mkdir -p release-artifacts
+          boot_app0="$(find ~/.platformio/packages -path '*/framework-arduinoespressif32/tools/partitions/boot_app0.bin' -print -quit)"
+          esptool="$(find ~/.platformio/packages -path '*/tool-esptoolpy/esptool.py' -print -quit)"
+          python "$esptool" --chip esp32s3 merge_bin \
+            -o release-artifacts/octoscale-usb.bin \
+            --flash_mode dio \
+            --flash_size 16MB \
+            0x0 .pio/build/esp32s3/bootloader.bin \
+            0x8000 .pio/build/esp32s3/partitions.bin \
+            0xe000 "$boot_app0" \
+            0x10000 .pio/build/esp32s3/firmware.bin
+          cp .pio/build/esp32s3/firmware.bin release-artifacts/octoscale-ota.bin
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release-artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "OctoScale $GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

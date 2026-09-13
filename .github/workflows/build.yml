@@ -6,11 +6,16 @@ on:
   pull_request:
     branches: [main, dev]
 
+permissions:
+  contents: read
+
 jobs:
   firmware:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -31,15 +36,59 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
+      - name: Check firmware version change
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+
+          if [[ "$base" == "0000000000000000000000000000000000000000" ]]; then
+            changed=true
+          else
+            changed=false
+            if ! git diff --quiet "$base" HEAD -- src/version.h; then
+              changed=true
+            fi
+          fi
+
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "Firmware version changed: $changed"
+
+      - name: Stop when firmware version is unchanged
+        if: steps.version.outputs.changed != 'true'
+        run: echo 'No firmware version change; skipping firmware artifact build.'
+
+      - name: Build firmware
+        if: steps.version.outputs.changed == 'true'
+        run: pio run -e esp32s3
+
       # The USB env is the one that actually compiles the firmware; the OTA env
       # shares [s3_base] entirely and differs only in upload transport, so
       # building one covers both.
-      - name: Build firmware
-        run: pio run -e esp32s3
+      - name: Create USB flash image
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          mkdir -p artifacts
+          boot_app0="$(find ~/.platformio/packages -path '*/framework-arduinoespressif32/tools/partitions/boot_app0.bin' -print -quit)"
+          esptool="$(find ~/.platformio/packages -path '*/tool-esptoolpy/esptool.py' -print -quit)"
+          python "$esptool" --chip esp32s3 merge_bin \
+            -o artifacts/octoscale-usb.bin \
+            --flash_mode dio \
+            --flash_size 16MB \
+            0x0 .pio/build/esp32s3/bootloader.bin \
+            0x8000 .pio/build/esp32s3/partitions.bin \
+            0xe000 "$boot_app0" \
+            0x10000 .pio/build/esp32s3/firmware.bin
+          cp .pio/build/esp32s3/firmware.bin artifacts/octoscale-ota.bin
 
-      - name: Upload firmware artifact
+      - name: Upload firmware artifacts
+        if: steps.version.outputs.changed == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: octoscale-firmware
-          path: .pio/build/esp32s3/firmware.bin
+          name: octoscale-firmware-${{ github.sha }}
+          path: artifacts/
           if-no-files-found: error

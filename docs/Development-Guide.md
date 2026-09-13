@@ -176,3 +176,5 @@ OctoPrint communication goes through the SpoolManagerExtended HTTP bridge. API k
 | `lib/PN5180 Library/` | Vendored and patched PN5180 driver |
 
 When changing public behavior, update the relevant Wiki guide and keep endpoint names, task ownership, and NVS behavior documented. Do not add local machine paths, API keys, WiFi credentials, MAC addresses, or private test data to committed documentation.
+
+The documentation workflow ends here. Return to the [Features](https://github.com/Ajimaru/OctoScale/wiki/Features) page for the project overview.
