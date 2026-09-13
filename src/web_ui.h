@@ -164,7 +164,7 @@ static const char INDEX_HTML[] PROGMEM =
     "nav button[aria-selected='true']{color:var(--accent);border-bottom-color:var(--accent)}"
     "nav button:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}"
     // --- panels + cards ---
-    "main{padding-top:16px}"
+    "main.wrap{padding-top:24px}"
     ".panel{display:none}.panel.active{display:block}"
     ".grid{display:grid;gap:12px}"
     "@media(min-width:600px){.grid.two{grid-template-columns:1fr 1fr}}"
