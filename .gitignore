@@ -14,3 +14,6 @@ secrets.h
 # Python bytecode (tools/)
 __pycache__/
 *.pyc
+
+# firmware build output
+artifacts/

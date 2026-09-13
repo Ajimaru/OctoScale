@@ -345,7 +345,8 @@ static void nfcClassifyTag(PN5180TagType type, uint16_t atqa, uint8_t sak,
 // status LED cycles red/yellow/green with the progress instead of its normal states.
 // Set from loop() (core 1, where both OTA paths run); read from pn5180Task (core 0).
 volatile bool g_otaInProgress = false;
-volatile uint8_t g_otaProgressPct = 0;   // 0..100, best-effort (web /update: unknown total -> stays 0 until done)
+volatile uint8_t g_otaProgressPct = 0;   // 0..100
+volatile uint32_t g_otaUploadContentLength = 0;
 
 // Display backlight + timeout (screensaver). After g_blTimeoutSec with no activity
 // (encoder/button, a real weight change, an NFC tag, web UI access) the display dims
@@ -2779,20 +2780,29 @@ void startWebServer() {
         if (up.status == UPLOAD_FILE_START) {
           Serial.printf("Web OTA: %s\n", up.filename.c_str());
           g_otaProgressPct = 0;
+          String contentLength = server.header("Content-Length");
+          g_otaUploadContentLength = contentLength.toInt();
           g_otaInProgress = true;  // pn5180Task locks the TFT/encoder on the next tick
           if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
         } else if (up.status == UPLOAD_FILE_WRITE) {
           if (Update.write(up.buf, up.currentSize) != up.currentSize)
             Update.printError(Serial);
+          if (g_otaUploadContentLength > 0) {
+            uint32_t pct = (uint32_t)((up.totalSize * 100ULL) / g_otaUploadContentLength);
+            g_otaProgressPct = (uint8_t)(pct > 99 ? 99 : pct);
+          }
         } else if (up.status == UPLOAD_FILE_END) {
           if (Update.end(true))
             Serial.printf("Web OTA OK: %u bytes\n", up.totalSize);
           else
             Update.printError(Serial);
+          g_otaProgressPct = 100;
           g_otaInProgress = false;
         }
       });
 
+  const char *uploadHeaders[] = {"Content-Length"};
+  server.collectHeaders(uploadHeaders, 1);
   server.begin();
   Serial.println("HTTP server running (port 80), web OTA at /update");
 }
