@@ -35,6 +35,10 @@ Tagged releases provide ready-to-use firmware files under [GitHub Releases](http
 
 Release artifacts are created when a tag such as `v0.0.1` matches `FW_VERSION` in `src/version.h`. The GitHub Actions firmware artifact is intended for CI inspection; the tagged GitHub Release is the stable download location.
 
+### Firmware update check and privacy
+
+When the System tab is opened, OctoScale checks the latest public GitHub Release through `api.github.com`. The device sends only the release metadata request; no scale readings, WiFi credentials, API keys, NFC data, or configuration are sent. GitHub can still see the device's public network IP address and request timing. Results are cached on the device for six hours. The check can fail when the device has no internet access, without affecting local operation or OTA updates.
+
 ## First-time setup
 
 Open `http://<device-ip>/` and work through these steps in order.
