@@ -20,6 +20,7 @@
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
 #include <Update.h>
+#include <HTTPClient.h>
 #include <HTTPUpdate.h>       // URL-based OTA (/updateurl)
 #include <WiFiClientSecure.h>
 #include <HX711.h>
@@ -304,6 +305,81 @@ int g_nfcExtCacheCapacityBytes = 0;
 // Mifare Classic there is no CC, so a failed default-key auth stands in for it: every
 // tag OctoScale writes uses the factory key, so "key rejected" means "not ours".
 String g_nfcExtCacheOccupancy = "";
+
+static const uint32_t FW_RELEASE_CHECK_CACHE_MS = 6UL * 60UL * 60UL * 1000UL;
+bool g_fwReleaseCheckDone = false;
+uint32_t g_fwReleaseCheckedAt = 0;
+bool g_fwUpdateAvailable = false;
+String g_fwLatestVersion = "";
+String g_fwReleaseUrl = "";
+String g_fwReleaseCheckError = "";
+bool g_fwOnlineEnabled = false;
+
+static bool firmwareVersionNewer(const String &current, const String &latest) {
+  int currentMajor = 0, currentMinor = 0, currentPatch = 0;
+  int latestMajor = 0, latestMinor = 0, latestPatch = 0;
+  String currentValue = current.startsWith("v") ? current.substring(1) : current;
+  String latestValue = latest.startsWith("v") ? latest.substring(1) : latest;
+  if (sscanf(currentValue.c_str(), "%d.%d.%d", &currentMajor, &currentMinor, &currentPatch) != 3 ||
+      sscanf(latestValue.c_str(), "%d.%d.%d", &latestMajor, &latestMinor, &latestPatch) != 3) {
+    return false;
+  }
+  if (latestMajor != currentMajor) return latestMajor > currentMajor;
+  if (latestMinor != currentMinor) return latestMinor > currentMinor;
+  return latestPatch > currentPatch;
+}
+
+static void checkLatestFirmwareRelease() {
+  if (g_fwReleaseCheckDone && millis() - g_fwReleaseCheckedAt < FW_RELEASE_CHECK_CACHE_MS) return;
+
+  g_fwReleaseCheckDone = true;
+  g_fwReleaseCheckedAt = millis();
+  g_fwUpdateAvailable = false;
+  g_fwLatestVersion = "";
+  g_fwReleaseUrl = "";
+  g_fwReleaseCheckError = "";
+
+  if (WiFi.status() != WL_CONNECTED) {
+    g_fwReleaseCheckError = "WiFi not connected";
+    return;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setTimeout(8000);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  if (!http.begin(client, "https://api.github.com/repos/Ajimaru/OctoScale/releases/latest")) {
+    g_fwReleaseCheckError = "HTTP connection failed";
+    return;
+  }
+  http.addHeader("Accept", "application/vnd.github+json");
+  http.addHeader("User-Agent", String("OctoScale/") + FW_VERSION);
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    g_fwReleaseCheckError = String("GitHub HTTP ") + code;
+    http.end();
+    return;
+  }
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, http.getString());
+  http.end();
+  if (error) {
+    g_fwReleaseCheckError = "Invalid GitHub response";
+    return;
+  }
+
+  const char *tag = doc["tag_name"] | "";
+  const char *releaseUrl = doc["html_url"] | "";
+  g_fwLatestVersion = tag;
+  if (g_fwLatestVersion.startsWith("v")) g_fwLatestVersion = g_fwLatestVersion.substring(1);
+  g_fwReleaseUrl = releaseUrl;
+  g_fwUpdateAvailable = g_fwReleaseUrl.length() > 0 && firmwareVersionNewer(FW_VERSION, g_fwLatestVersion);
+  if (g_fwLatestVersion.length() == 0 || g_fwReleaseUrl.length() == 0) {
+    g_fwReleaseCheckError = "GitHub release data incomplete";
+  }
+}
 
 // Maps a probed tag to the format the firmware would use if asked to write spool data
 // to it right now (mirrors pn5180WriteSpoolTag's dispatch, without actually writing).
@@ -2656,6 +2732,36 @@ void startWebServer() {
     doc["core1Load"] = g_coreLoad[1];
     // Uptime
     doc["uptimeSec"] = (uint32_t)(millis() / 1000);
+    doc["fwVersion"] = FW_VERSION;
+    doc["fwOnlineEnabled"] = g_fwOnlineEnabled;
+    doc["otaInProgress"] = g_otaInProgress;
+    doc["otaProgressPct"] = g_otaProgressPct;
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
+  });
+
+  server.on("/firmware/settings", []() {
+    if (server.hasArg("enabled")) {
+      g_fwOnlineEnabled = server.arg("enabled") == "1";
+      Preferences p;
+      p.begin("octoscale", false);
+      p.putBool("fwOnline", g_fwOnlineEnabled);
+      p.end();
+    }
+    server.send(200, "application/json",
+                String("{\"enabled\":") + (g_fwOnlineEnabled ? "true" : "false") + "}");
+  });
+
+  server.on("/firmware/check", []() {
+    checkLatestFirmwareRelease();
+    JsonDocument doc;
+    doc["currentVersion"] = FW_VERSION;
+    doc["checked"] = g_fwReleaseCheckDone;
+    doc["available"] = g_fwUpdateAvailable;
+    doc["latestVersion"] = g_fwLatestVersion;
+    doc["releaseUrl"] = g_fwReleaseUrl;
+    doc["error"] = g_fwReleaseCheckError;
     String out;
     serializeJson(doc, out);
     server.send(200, "application/json", out);
@@ -3146,6 +3252,7 @@ void setup() {
     g_ledPin2 = p.getBool("ledPin2", true);
     g_dbgLogEnabled = p.getBool("dbgLogEn", false);
     g_menuDark = p.getBool("menuDark", true);   // TFT theme, dark by default
+    g_fwOnlineEnabled = p.getBool("fwOnline", false);
     p.end();
   }
   menuApplyTheme();  // the palette globals still hold the compile-time default
