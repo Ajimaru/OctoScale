@@ -26,6 +26,15 @@ pio run -e esp32s3_ota -t upload --upload-port <device-ip>
 
 Use the IP address for OTA rather than `octoscale.local` because mDNS can make `espota` time out.
 
+### Prebuilt firmware files
+
+Tagged releases provide ready-to-use firmware files under [GitHub Releases](https://github.com/Ajimaru/OctoScale/releases):
+
+- `octoscale-usb.bin` is the merged image for a first USB flash. Flash it at address `0x0` with an ESP32-S3 tool such as `esptool`.
+- `octoscale-ota.bin` is the application image for an OTA update through the web UI or the `/updateurl` endpoint. Do not use it for the first flash; it does not contain the bootloader and partition table.
+
+Release artifacts are created when a tag such as `v0.0.1` matches `FW_VERSION` in `src/version.h`. The GitHub Actions firmware artifact is intended for CI inspection; the tagged GitHub Release is the stable download location.
+
 ## First-time setup
 
 Open `http://<device-ip>/` and work through these steps in order.

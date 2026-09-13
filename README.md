@@ -44,7 +44,7 @@ The complete build and maintenance documentation is in the Assembly Guide:
 - [OctoScale Features](https://github.com/Ajimaru/OctoScale/wiki/Features) — supported scale, NFC, interface, connectivity, OTA, and backup features.
 - [Hardware & Printing Guide](https://github.com/Ajimaru/OctoScale/wiki/Hardware-and-Printing-Guide) — hardware BOM and printable enclosure parts.
 - [OctoScale Assembly Guide](https://github.com/Ajimaru/OctoScale/wiki/Assembly-Guide) — wiring, enclosure assembly, project layout, and core/task notes.
-- [Setup Guide](https://github.com/Ajimaru/OctoScale/wiki/Setup-Guide) — firmware flash, OTA updates, and first-time setup.
+- [Setup Guide](https://github.com/Ajimaru/OctoScale/wiki/Setup-Guide) — firmware flash, prebuilt `octoscale-usb.bin` and `octoscale-ota.bin` downloads, OTA updates, and first-time setup.
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)

@@ -22,8 +22,9 @@ pio run -e esp32s3 -t upload                          # flash over USB
 pio run -e esp32s3_ota -t upload --upload-port <ip>   # flash over the network
 ```
 
-CI builds `esp32s3` on every push and PR. The OTA environment inherits everything from
-`[s3_base]` and differs only in upload transport, so a green build covers both.
+CI checks every push and pull request. Firmware artifacts are built only when `src/version.h`
+changes; tagged releases such as `v0.0.1` build and publish `octoscale-usb.bin` and
+`octoscale-ota.bin` as release assets.
 
 ## Code style
 
