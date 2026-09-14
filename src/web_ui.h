@@ -629,6 +629,7 @@ static const char INDEX_HTML[] PROGMEM =
     "<label class='field'>From URL (ESP downloads the .bin)</label>"
     "<input type='url' id='fwu' placeholder='http://.../firmware.bin'>"
     "<button type='submit' class='ghost'>Update from URL</button></form>"
+    "<div id='fwprogress'></div>"
     "<div id='fwmsg' class='note' style='text-align:center;min-height:1.1em'></div></div>"
     "</div></section>"
 
@@ -1081,8 +1082,11 @@ static const char INDEX_HTML[] PROGMEM =
     "function fcancel(){fetch('/flow/cancel').then(r=>r.json()).then(fRender);}"
     // ---- Firmware update from URL ----
     "var fwProgress={active:false,pct:0,indeterminate:false};"
+    "function fwProgressRender(){var box=document.getElementById('fwprogress');"
+    "if(!box)return;box.innerHTML=fwProgress.active?'<div class=\"fw-progress\"><div class=\"bar\"><i class=\"'+(fwProgress.indeterminate?'indeterminate':'')+'\" style=\"width:'+(fwProgress.indeterminate?35:fwProgress.pct)+'%\"></i></div>'"
+    "+'<div class=\"note\" style=\"text-align:center\">Firmware update '+(fwProgress.indeterminate?'in progress':fwProgress.pct+'%')+'</div></div>':'';}"
     "function fwProgressSet(active,pct,indeterminate){fwProgress.active=active;"
-    "fwProgress.pct=pct;fwProgress.indeterminate=!!indeterminate;sysupd();}"
+    "fwProgress.pct=pct;fwProgress.indeterminate=!!indeterminate;fwProgressRender();}"
     "function fwurl(e){var u=document.getElementById('fwu').value.trim();"
     "var m=document.getElementById('fwmsg');"
     "if(!u){m.style.color='var(--bad)';m.textContent='\\u2717 Enter a URL';return;}"
@@ -1361,7 +1365,7 @@ static const char INDEX_HTML[] PROGMEM =
     "function sysupd(){fetch('/system').then(r=>r.json()).then(o=>{"
     "fwOnlineEnabled=!!o.fwOnlineEnabled;"
     "if(o.otaInProgress){fwProgress.active=true;fwProgress.pct=o.otaProgressPct||0;"
-    "fwProgress.indeterminate=false;}"
+    "fwProgress.indeterminate=false;}fwProgressRender();"
     // header status chips: Scale (ready) + DB (reachable). NFC via upN, WiFi via wifiupd.
     "document.getElementById('cScale').querySelector('.led').className='led '+(o.scaleReady?'ok':'bad');"
     "document.getElementById('cDb').querySelector('.led').className='led '+(o.dbReachable===1?'ok':(o.dbReachable===0?'bad':''));"
@@ -1386,10 +1390,8 @@ static const char INDEX_HTML[] PROGMEM =
     "+(fwInfo.available?' <span class=\"fw-new\">- <a href=\"'+fwInfo.releaseUrl+'\" target=\"_blank\" rel=\"noopener noreferrer\">v'+fwInfo.latestVersion+'</a></span>':'')"
     "+'</span></div>'"
     "+'</div>'"
-    "+(fwProgress.active?'<div class=\"fw-progress\"><div class=\"bar\"><i class=\"'+(fwProgress.indeterminate?'indeterminate':'')+'\" style=\"width:'+(fwProgress.indeterminate?35:fwProgress.pct)+'%\"></i></div>'"
-    "+'<div class=\"note\" style=\"text-align:center\">Firmware update '+(fwProgress.indeterminate?'in progress':fwProgress.pct+'%')+'</div></div>':'')"
     "+'<label class=\"switch\" style=\"margin-top:12px\"><input type=\"checkbox\"'+(fwOnlineEnabled?' checked':'')"
-    "+' onchange=\"fwToggle(this.checked)\"> Enable online firmware update.</label>';"
+    "+' onchange=\"fwToggle(this.checked)\"> Enable online firmware update check.</label>';"
     "document.getElementById('sysbox').innerHTML=h;});}"
     // ---- WiFi status ----
     "function wifibars(q){var n=q>=75?4:q>=50?3:q>=25?2:q>0?1:0;"
