@@ -1,8 +1,6 @@
 # OctoScale Features
 
-NFC filament scale for OctoPrint and SpoolManagerExtended. This page summarizes the device capabilities and supported tag formats. See the [Assembly Guide](https://github.com/Ajimaru/OctoScale/wiki/Assembly-Guide) for hardware, wiring, enclosure, firmware, setup, and maintenance.
-
-<img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/OctoScale.jpg" width="380" alt="Assembled OctoScale with a spool on the scale">
+NFC filament scale for OctoPrint and SpoolManagerExtended. This page summarizes the device capabilities and supported tag formats. See the [Assembly Guide](Assembly-Guide) for hardware, wiring, enclosure, firmware, setup, and maintenance.
 
 ## Scale
 
@@ -40,4 +38,4 @@ Foreign tags such as Snapmaker U1 tags fall back to a UID lookup in SpoolManager
 - Multiple OctoPrint instances with database failover when instances share an external database.
 - AES-256-CBC encrypted JSON configuration backup; API keys are never exported in plaintext.
 
-Continue with the [Hardware & Printing Guide](https://github.com/Ajimaru/OctoScale/wiki/Hardware-and-Printing-Guide) to gather components and print the enclosure parts.
+Continue with the [Hardware & Printing Guide](Hardware-and-Printing-Guide) to gather components and print the enclosure parts.
