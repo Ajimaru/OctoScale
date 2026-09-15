@@ -133,6 +133,18 @@ Keep NFC work asynchronous at the HTTP boundary: start operations with the exist
 
 A spool colour is expressed as a small grammar rather than a single hex value: `#RRGGBB`, up to three colours separated by `;`, an optional leading `transparent:` prefix, the bare word `transparent` for an untinted spool, or the bare word `rainbow`.
 
+Composition is the exact inverse of parsing, so a `colorFull` read back and written again is unchanged:
+
+| `isRainbow` | `isTransparent` | `colorCount` | `colorFull` |
+| --- | --- | --- | --- |
+| true | any | any | `rainbow` |
+| false | true | 0 | `transparent` |
+| false | true | 2 | `transparent:#000000;#FFFFFF` |
+| false | false | 1 | `#000000` |
+| false | false | 0 | *(empty)* |
+
+`transparent` with `colorCount == 0` is a legitimate state, not a missing value: an untinted transparent spool has no primary colour to report. A composer must not emit `#000000` there — the zeroed primary slot is unset, not black.
+
 **`colorFull` is the field to rely on.** It carries the complete colour information for every tag format and can be written back verbatim. `extended.color` is deliberately narrower — the primary colour as plain `#RRGGBB`, and empty for `rainbow` or bare `transparent`, which have no primary colour. `colorCount`, `colors[]`, `isTransparent`, and `isRainbow` expose the parsed parts so consumers need not re-parse the grammar.
 
 Black is a real colour, not a missing one: a black spool reads back as `#000000`. Three zero bytes mean black, never "unset" — the older reading, which treated `0,0,0` as absence, silently dropped every black spool.
