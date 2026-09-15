@@ -1,0 +1,64 @@
+name: wiki-sync
+
+# Publishes docs/*.md to the GitHub wiki. docs/ is the single source of truth:
+# edits made directly in the wiki are overwritten on the next sync.
+on:
+  push:
+    branches: [main]
+    paths: ['docs/**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # The wiki is a second git repo -- two syncs pushing at once would race and
+  # one would fail on a non-fast-forward.
+  group: wiki-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # GITHUB_TOKEN cannot write to a wiki (GitHub limitation), so this needs a
+      # PAT with 'repo' scope stored as the WIKI_TOKEN secret. Without it the
+      # clone below fails with an authentication error.
+      - name: Clone wiki
+        env:
+          WIKI_TOKEN: ${{ secrets.WIKI_TOKEN }}
+        run: |
+          if [ -z "$WIKI_TOKEN" ]; then
+            echo "::error::WIKI_TOKEN secret is not set -- see docs/Development-Guide.md, 'Documentation and wiki sync'."
+            exit 1
+          fi
+          git clone --depth 1 \
+            "https://x-access-token:${WIKI_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki
+
+      - name: Copy pages
+        run: |
+          # Every file in docs/ is a wiki page; the filename is the page name.
+          # The wiki's Home page is NOT synced -- it is a short landing page with
+          # its own navigation and lives only in the wiki. Nothing here overwrites
+          # it, because docs/ contains no Home.md.
+          cp docs/*.md wiki/
+
+      - name: Commit and push
+        working-directory: wiki
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Stage only the pages we copied. 'git add -A' would stage the DELETION
+          # of every wiki page that has no counterpart in docs/ -- Home.md above
+          # all -- and quietly wipe the wiki's entry point.
+          for f in ../docs/*.md; do git add "$(basename "$f")"; done
+          # A no-op run is normal (e.g. a whitespace-only change that the wiki
+          # already has); exit cleanly rather than failing on an empty commit.
+          if git diff --staged --quiet; then
+            echo "Wiki already up to date."
+            exit 0
+          fi
+          git commit -m "docs: sync from ${GITHUB_SHA}"
+          git push
