@@ -1666,24 +1666,14 @@ void startWebServer() {
       ext["material"] = e.material;
       ext["vendor"] = e.vendor;
       ext["color"] = e.color;
-      // v4 multi-colour, reported as a rebuilt grammar string plus the parsed parts.
-      // colorFull is what a caller would write back verbatim; the array and the two
-      // flags are there so a consumer doesn't have to re-parse the grammar itself.
+      // Multi-colour, reported as a rebuilt grammar string plus the parsed parts.
+      // colorFull is THE field a caller can rely on: it always carries the complete
+      // colour information and can be written back verbatim. "color" above stays the
+      // primary colour as plain "#RRGGBB" -- narrower by design, and what the web UI
+      // shows. The array and the two flags save a consumer from re-parsing the grammar.
       {
-        String full;
-        if (e.isRainbow) full = "rainbow";
-        else {
-          if (e.isTransparent) full = "transparent";
-          char hx[10];
-          for (int i = 0; i < e.colorCount && i < 3; i++) {
-            snprintf(hx, sizeof(hx), "#%02X%02X%02X",
-                     e.colorRgb[i][0], e.colorRgb[i][1], e.colorRgb[i][2]);
-            if (i == 0) full += e.isTransparent ? ":" : "";
-            else full += ";";
-            full += hx;
-          }
-        }
-        ext["colorFull"] = full;
+        ext["colorFull"] = pn5180ComposeColorGrammar(e.colorRgb, e.colorCount,
+                                                     e.isTransparent, e.isRainbow);
         ext["colorCount"] = e.colorCount;
         ext["isTransparent"] = e.isTransparent;
         ext["isRainbow"] = e.isRainbow;
