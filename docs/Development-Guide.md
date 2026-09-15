@@ -90,18 +90,20 @@ The external 5 V supply powers the PN5180 RF section and TFT. A regulated 3.3 V 
 
 The PN5180 needs a 470 uF capacitor directly across its 5 V and ground pins. RF current spikes can otherwise collapse the supply and appear as a software or SPI failure. Do not power the ESP32-S3 from USB while an external 5 V supply is connected to its 5 V/VBUS/VIN input.
 
-Buffer the ESP32-S3 board's own supply as well. The reference build uses:
+Two more electrolytic capacitors buffer the rest of the build:
 
-| Position | Part | Rating |
+| Position | Part | Buffers |
 | --- | --- | --- |
-| Board `5V` to `GND` | 1500 uF electrolytic | 10 V or higher |
-| Board `3V3` to `GND` | 100 uF electrolytic | 16 V or higher |
+| ESP32-S3 `5V` to `GND` | 1500 uF, 10 V+ | the board's own supply through WiFi transmit bursts |
+| Mini-360 `OUT+` to `GND` | 100 uF, 16 V+ | the 3.3 V rail feeding HX711 and PN5180 logic |
 
-Mount both with the shortest possible leads, directly at the pins — a capacitor a few centimetres away on a breadboard rail buys very little, because the lead inductance undoes it. Observe polarity; a reversed electrolytic can vent.
+Mount both with short leads directly at the pins they buffer; a few centimetres of wire undoes most of the benefit. Observe polarity.
 
-WiFi transmit bursts draw current faster than a thin cable can deliver it, and every 3.3 V consumer is derived from the same 5 V input, so a dip there propagates to the whole board. Sizing: a transmit burst is roughly 300 mA for about 2 ms, so holding it to a 0.2 V dip would need about 3000 uF. 1500 uF does not cover that fully but damps it hard, and is the sensible stopping point — more capacitance mainly buys inrush trouble. Keep the 3.3 V capacitor deliberately small: that rail carries logic loads only, and a large capacitance at the far end of the buck converter raises its inrush at power-on without helping the bursts. Bulk buffering belongs on 5 V, where the current is actually drawn.
+Sizing for the 5 V one: a WiFi transmit burst is roughly 300 mA for about 2 ms, so holding it to a 0.2 V dip would take about 3000 uF. 1500 uF does not cover that fully but damps it hard, and is the sensible stopping point — more capacitance mainly buys inrush trouble. The 3.3 V capacitor stays small because that rail carries logic loads only; the bulk buffering belongs on 5 V, where the current is actually drawn.
 
-Ceramic 100 nF capacitors in parallel with each electrolytic are good practice against high-frequency noise, but they are not what fixes brownouts — the electrolytics handle the slow, large dips. The reference build runs without them.
+The 3.3 V capacitor belongs at the **converter output**, not at the ESP32-S3's `3V3` pin. That pin is an output of the board's own regulator and feeds nothing in this build — HX711 and PN5180 logic hang on the Mini-360. A large capacitance on a regulator's output also does it no favours.
+
+Ceramic 100 nF capacitors in parallel with each electrolytic are good practice against high-frequency noise, but they are not what prevents brownouts — the electrolytics handle the slow, large dips. The reference build runs without them.
 
 Watch the supply path itself, not just the power supply's rating. Every connector, switch, and metre of thin cable between the supply and the board adds series resistance, and a chain of them can limit a burst badly enough to reset the device while a multimeter still reads a healthy idle voltage. If the device resets unpredictably, read `resetReason` from `/system` first: value 9 is a brownout and points at the supply path rather than at firmware. Prefer a short, thick, direct connection, and put any remote power switching on the mains side of the 5 V supply rather than in the low-voltage path.
 
@@ -214,7 +216,7 @@ OctoPrint communication goes through the SpoolManagerExtended HTTP bridge. API k
 1. Confirm the selected PlatformIO environment matches the board memory configuration.
 2. Disconnect external power before USB flashing.
 3. Close serial monitors before uploading.
-4. Verify the PN5180 has external 5 V, common ground, and the local 470 uF capacitor, and that the board's own 5 V and 3.3 V pins are buffered.
+4. Verify the PN5180 has external 5 V, common ground, and the local 470 uF capacitor, and that the board's 5 V pin and the converter output are buffered.
 5. For unexplained resets, read `resetReason` from `/system` before suspecting firmware: 9 is a brownout and points at the supply path, 6 is a task watchdog, 1 is a normal power-on.
 6. Confirm PN5180 and TFT are on separate SPI buses.
 7. Check the serial console for boot progress and WiFi/AP status.
@@ -240,7 +242,7 @@ When changing public behavior, update the relevant guide under `docs/` and keep 
 
 ## Documentation and wiki sync
 
-`docs/` is the single source of truth. Every file there is a wiki page and the filename is the page name. The `wiki-sync` workflow copies `docs/*.md` to the GitHub wiki on every push to `main` that touches them, and can also be run manually from the Actions tab. **Edits made directly in the wiki are overwritten by the next sync** — change the file under `docs/` instead.
+`docs/` is the single source of truth. Every file there is a wiki page and the filename is the page name. The `wiki-sync` workflow copies `docs/*.md` to the GitHub wiki on every push to `main` that touches them, and can also be run manually from the Actions tab. **Edits made directly in the wiki are overwritten by the next sync** — change the file under `docs/` instead, or the change is lost the next time anyone edits documentation.
 
 The wiki's `Home` page is not synced and has no counterpart in `docs/`. It is a short landing page with its own navigation and images, maintained in the wiki itself.
 
@@ -248,4 +250,4 @@ The workflow needs a repository secret named `WIKI_TOKEN` containing a personal 
 
 Anything that a consumer of the HTTP API can rely on belongs in this guide rather than only in a code comment. A promise that lives in the implementation holds only until someone rewrites the implementation; a documented one makes a later change the maintainer's problem instead of a downstream surprise. Any field the firmware accepts is part of the contract whether or not it is written down — the only choice is whether that contract is legible.
 
-The documentation workflow ends here. Return to the [Features](https://github.com/Ajimaru/OctoScale/wiki/Features) page for the project overview.
+The documentation workflow ends here. Return to the [Features](Features) page for the project overview.

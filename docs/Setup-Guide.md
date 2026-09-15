@@ -1,6 +1,6 @@
 # OctoScale Setup Guide
 
-This guide covers the first firmware flash, OTA updates, and first-time device setup. Start with the [Assembly Guide](https://github.com/Ajimaru/OctoScale/wiki/Assembly-Guide) if the hardware is not assembled yet.
+This guide covers the first firmware flash, OTA updates, and first-time device setup. Start with the [Assembly Guide](Assembly-Guide) if the hardware is not assembled yet.
 
 ## Build & flash
 
@@ -35,10 +35,6 @@ Tagged releases provide ready-to-use firmware files under [GitHub Releases](http
 
 Release artifacts are created when a tag such as `v0.0.1` matches `FW_VERSION` in `src/version.h`. The GitHub Actions firmware artifact is intended for CI inspection; the tagged GitHub Release is the stable download location.
 
-### Firmware update check and privacy
-
-When the System tab is opened, OctoScale checks the latest public GitHub Release through `api.github.com`. The device sends only the release metadata request; no scale readings, WiFi credentials, API keys, NFC data, or configuration are sent. GitHub can still see the device's public network IP address and request timing. Results are cached on the device for six hours. The check can fail when the device has no internet access, without affecting local operation or OTA updates.
-
 ## First-time setup
 
 Open `http://<device-ip>/` and work through these steps in order.
@@ -55,4 +51,4 @@ Database features require [OctoPrint-SpoolManagerExtended](https://github.com/Oc
 
 Without the plugin, weighing, taring, calibration, reading, writing, and erasing NFC tags still work. Automatic lookup, printer/tool selection, and database weight updates do not.
 
-Continue with the [User Guide](https://github.com/Ajimaru/OctoScale/wiki/User-Guide) to operate the device, or consult the [Development Guide](https://github.com/Ajimaru/OctoScale/wiki/Development-Guide) for implementation details.
+Continue with the [User Guide](User-Guide) to operate the device, or consult the [Development Guide](Development-Guide) for implementation details.
