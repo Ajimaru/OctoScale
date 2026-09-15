@@ -141,9 +141,11 @@ Composition is the exact inverse of parsing, so a `colorFull` read back and writ
 | false | true | 0 | `transparent` |
 | false | true | 2 | `transparent:#000000;#FFFFFF` |
 | false | false | 1 | `#000000` |
-| false | false | 0 | *(empty)* |
+| false | false | 0 | no colour — see below |
 
 `transparent` with `colorCount == 0` is a legitimate state, not a missing value: an untinted transparent spool has no primary colour to report. A composer must not emit `#000000` there — the zeroed primary slot is unset, not black.
+
+The last row is the one case where the grammar says nothing about representation, only about state. This firmware always emits the key with an empty string; a consumer that distinguishes "absent" from "present but empty" — the OctoPrint plugin omits the key entirely — is equally correct. **Treat an empty `colorFull` and an absent one as the same thing.** Neither is a colour, and reading one as the negation of the other invents a distinction the grammar does not make.
 
 **`colorFull` is the field to rely on.** It carries the complete colour information for every tag format and can be written back verbatim. `extended.color` is deliberately narrower — the primary colour as plain `#RRGGBB`, and empty for `rainbow` or bare `transparent`, which have no primary colour. `colorCount`, `colors[]`, `isTransparent`, and `isRainbow` expose the parsed parts so consumers need not re-parse the grammar.
 
