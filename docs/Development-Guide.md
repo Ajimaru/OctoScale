@@ -147,6 +147,15 @@ Composition is the exact inverse of parsing, so a `colorFull` read back and writ
 
 The last row is the one case where the grammar says nothing about representation, only about state. This firmware always emits the key with an empty string; a consumer that distinguishes "absent" from "present but empty" — the OctoPrint plugin omits the key entirely — is equally correct. **Treat an empty `colorFull` and an absent one as the same thing.** Neither is a colour, and reading one as the negation of the other invents a distinction the grammar does not make.
 
+A consumer falling back to another field must test for **absence**, not for falsyness:
+
+```js
+const c = colorFull != null ? colorFull : color;   // correct
+const c = colorFull ? colorFull : color;           // wrong: "" falls through
+```
+
+Both spellings behaved identically while black was still dropped on read, because a black spool left every colour field empty. Since black reads back as `#000000`, they diverge: the falsy test sends a legitimately colourless spool to a fallback field that is also empty, and on formats where `color` is populated it can resurrect a stale value the grammar had deliberately cleared. This is a live trap for anything written against the older behaviour.
+
 **`colorFull` is the field to rely on.** It carries the complete colour information for every tag format and can be written back verbatim. `extended.color` is deliberately narrower — the primary colour as plain `#RRGGBB`, and empty for `rainbow` or bare `transparent`, which have no primary colour. `colorCount`, `colors[]`, `isTransparent`, and `isRainbow` expose the parsed parts so consumers need not re-parse the grammar.
 
 Black is a real colour, not a missing one: a black spool reads back as `#000000`. Three zero bytes mean black, never "unset" — the older reading, which treated `0,0,0` as absence, silently dropped every black spool.
