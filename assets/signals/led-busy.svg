@@ -1,0 +1,14 @@
+<svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Writing / reading tag - status LED">
+  <title>Writing / reading tag</title>
+  <defs>
+    <radialGradient id="g-led-busy">
+      <stop offset="0%" stop-color="#2f8fe0" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#2f8fe0" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="120" height="120" rx="14" fill="#0a0908"/>
+  <g>
+    <circle cx="60" cy="60" r="42" fill="url(#g-led-busy)"><animate attributeName="opacity" values="1;1;0.08;0.08" keyTimes="0;0.499;0.5;1" dur="0.5s" repeatCount="indefinite" calcMode="discrete"/></circle>
+    <circle cx="60" cy="60" r="20" fill="#2f8fe0"><animate attributeName="opacity" values="1;1;0.08;0.08" keyTimes="0;0.499;0.5;1" dur="0.5s" repeatCount="indefinite" calcMode="discrete"/></circle>
+  </g>
+</svg>
