@@ -135,7 +135,21 @@ A spool colour is expressed as a small grammar rather than a single hex value: `
 
 **`colorFull` is the field to rely on.** It carries the complete colour information for every tag format and can be written back verbatim. `extended.color` is deliberately narrower — the primary colour as plain `#RRGGBB`, and empty for `rainbow` or bare `transparent`, which have no primary colour. `colorCount`, `colors[]`, `isTransparent`, and `isRainbow` expose the parsed parts so consumers need not re-parse the grammar.
 
-Black is a real colour, not a missing one: a black spool reads back as `#000000`. The one exception is an extended tag written before its carrier gained the colour-flag byte — Mifare v4, NFC-V v3, NTAG v2. On those older tags "black" and "no colour set" are the same bytes and cannot be told apart, so the field stays empty rather than guessing a colour that could overwrite a real one on import.
+Black is a real colour, not a missing one: a black spool reads back as `#000000`. Three zero bytes mean black, never "unset" — the older reading, which treated `0,0,0` as absence, silently dropped every black spool.
+
+The one exception is an extended tag written before its carrier gained the colour-flag byte. On those tags "black" and "no colour set" are genuinely the same bytes and cannot be told apart, so the field stays empty rather than guessing a colour that could overwrite a real one on import.
+
+**The version counters run per carrier and do not line up.** Each carrier gained the flag byte at its own version number, so there is no single "from v4" rule — reading one carrier's threshold as if it applied to the others is the mistake this table exists to prevent:
+
+| Carrier | Colour flags from | Current version | Read-path gate |
+| --- | --- | --- | --- |
+| Mifare Classic Extended | **v4** | v5 | `block8[2] >= 0x04` |
+| NFC-V Extended | **v3** | v4 | `isV3nfcv` |
+| NTAG Extended | **v2** | v3 | `fixedBuf[2] >= 0x02` |
+
+Below its gate, a carrier's colour field is left empty; at or above it, the flag byte is authoritative and `colorCount` says how many colours are set. The gate governs only this ambiguity — a tag below the gate still reads its primary colour when the bytes are non-zero.
+
+Formats that encode absence explicitly have no such ambiguity and are never gated: OpenSpool and OpenPrintTag omit the field entirely when no colour is set (a missing JSON key / CBOR key 19), so zero bytes there are unambiguously black. TigerTag has no "not set" sentinel at all — `0,0,0` is black, and byte 19 is alpha, not a presence marker.
 
 ### Vendored PN5180 patches
 
