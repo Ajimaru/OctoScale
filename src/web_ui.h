@@ -983,10 +983,11 @@ static const char INDEX_HTML[] PROGMEM =
     "document.getElementById('dbgbox').style.display=o.enabled?'':'none';"
     "if(o.enabled)dbgpoll();});}"
     // Self-chaining 500ms poll -- the fastest loop in the page. Stops while the tab is
-    // hidden (the visibilitychange handler at the bottom restarts it on return), so a
-    // backgrounded tab with the debug console open doesn't keep pulling the log.
+    // hidden or the user has switched to another tab (the visibilitychange handler and
+    // tabRefresh at the bottom restart it on return), so neither a backgrounded window
+    // nor a switched-away debug console keeps pulling the log.
     "function dbgpoll(){var cb=document.getElementById('dbge');if(!cb.checked)return;"
-    "if(document.hidden)return;"
+    "if(document.hidden||currentTab!=='debug')return;"
     "fetch('/debuglog').then(r=>r.json()).then(o=>{"
     "if(o.seq!==dbgSeq){dbgSeq=o.seq;var b=document.getElementById('dbgbox');"
     "b.textContent=o.lines.join('\\n');b.scrollTop=b.scrollHeight;}"
@@ -1218,12 +1219,18 @@ static const char INDEX_HTML[] PROGMEM =
     // Auto-cycle: a plain client-side setInterval calling the existing ?next=1 step
     // endpoint -- no new firmware endpoint needed, this just automates the same knob
     // action a person would do by hand.
+    // Gated like every other poller: an unguarded interval kept stepping the device's
+    // screens from a hidden or switched-away tab, and an active preview suppresses the
+    // NFC poll device-side (see pn5180Task's g_menuPreviewActive check) -- so a
+    // forgotten auto-cycle silently stopped tag detection.
     "function mpvAutoToggle(){"
     "var cb=document.getElementById('mpvauto');"
     "clearInterval(mpvAutoTimer);mpvAutoTimer=null;"
     "if(cb.checked){"
     "var sec=Math.max(1,parseInt(document.getElementById('mpvsec').value,10)||10);"
-    "mpvAutoTimer=setInterval(function(){fetch('/menupreview?next=1');},sec*1000);"
+    "mpvAutoTimer=setInterval(function(){"
+    "if(document.hidden||currentTab!=='debug')return;"
+    "fetch('/menupreview?next=1');},sec*1000);"
     "}}"
     // Changing the seconds field while auto-cycle is running restarts the interval at
     // the new period instead of waiting out whatever was left of the old one.
@@ -1412,7 +1419,11 @@ static const char INDEX_HTML[] PROGMEM =
     // Header status is intentionally independent from the active tab. Keep this
     // lightweight poll separate from the tab detail polls so the LEDs stay current
     // while the page is visible and still refresh after switching tabs.
+    // Still NOT tab-gated (see above), but the hidden-window check does apply: nobody
+    // is looking at a backgrounded window, and this is the only poller firing two
+    // requests (/system + /wifi/status), so leaving it unguarded doubled idle traffic.
     "function statusPoll(){"
+    "if(document.hidden)return;"
     "fetch('/system').then(r=>r.json()).then(function(o){"
     "document.getElementById('cNfc').querySelector('.led').className='led '+(o.nfcReady?'ok':'bad');"
     "document.getElementById('cScale').querySelector('.led').className='led '+(o.scaleReady?'ok':'bad');"
@@ -1465,7 +1476,9 @@ static const char INDEX_HTML[] PROGMEM =
     "setInterval(function(){if(!document.hidden&&(currentTab==='setup'||currentTab==='system'))wifiupd();},5000);"
     "setInterval(pv(sysupd,'system'),3000);setInterval(pv(ndbg,'debug'),700);setInterval(pv(scpoll,'scale'),1000);"
     "setInterval(statusPoll,10000);"
+    // Returning to a hidden window: refresh the active tab AND the header LEDs, which
+    // are not part of any tab and would otherwise sit stale until the next 10s tick.
     "document.addEventListener('visibilitychange',function(){if(!document.hidden){"
-    "tabRefresh(currentTab);}});"
+    "tabRefresh(currentTab);statusPoll();}});"
     "themeInit();upF();wpoll();fpoll();statusPoll();octol();dbload();tmload();blload();ldload();bzload();</script>"
     "</body></html>";

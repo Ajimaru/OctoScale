@@ -184,9 +184,18 @@ long g_lastSpoolId = -1;     // databaseId parsed from the tag (-1 = none)
 String g_pn5180Uid = "";
 bool g_pn5180Present = false;
 
+// Tag poll cadence. Every tick energises the RF field, so this is the single largest
+// periodic current draw on the 5V rail -- hence 750ms rather than the original 500ms:
+// still fast enough that placing a spool feels immediate, but a third fewer RF cycles.
+// Anything that needs a duration must be expressed in MILLISECONDS, never in a count
+// of poll ticks: tick counts silently change meaning when this constant moves (the
+// flow-reset debounce used to do exactly that -- see flowOnTagGone).
+static const uint32_t PN5180_POLL_INTERVAL_MS = 750;
+
 // NFC debug mode: a web UI toggle. ON = the reader only reads and reports the tag
 // TYPE (NFC-V/NFC-A) + UID/ATQA/SAK, no normal flow. OFF = normal operation
-// (500ms ISO15693 poll, sets g_pn5180Uid/g_pn5180Present for /nfc5180 + the flow).
+// (ISO15693 poll every PN5180_POLL_INTERVAL_MS, sets g_pn5180Uid/g_pn5180Present
+// for /nfc5180 + the flow).
 bool g_nfcDebug = false;
 PN5180ProbeResult g_nfcProbe;   // latest debug result, readable via /nfcprobe
 // Debug mode toggled via HTTP (core 1), but pn5180Recover() touches the PN5180 SPI
@@ -287,7 +296,7 @@ volatile unsigned long g_nfcReadSuppressUntil = 0;
 
 // Extended tag data (plan C.4 "Lesekosten beachten"): the Mifare Extended / NTAG
 // OpenSpool read costs 1-3 extra authenticated block reads or NDEF page reads on top
-// of the already-running poll -- running it every 500ms poll tick would be wasted work
+// of the already-running poll -- running it on every poll tick would be wasted work
 // for a tag that isn't changing. Cached per UID: only re-run when the UID changes (new
 // tag, or tag removed+re-placed), same "handle it once" pattern as g_lastUid below.
 String g_nfcExtCacheUid = "";        // UID this cache was computed for ("" = none/stale)
@@ -511,7 +520,8 @@ String g_nfcWriteUid = "";                 // task writes: UID of the tag that w
 
 // Result handoff for the TFT result screen. g_nfcWriteDone can NOT be used for this:
 // it is cleared by the /nfcwritestatus handler (core 1) as soon as the caller polls,
-// and SpoolManagerExtended polls every 500ms. Since the blocking write runs inside pn5180Task
+// and SpoolManagerExtended polls every 500ms of its own. Since the blocking write runs
+// inside pn5180Task
 // -- the same task as menuTick() -- the flag is often already gone by the time the
 // menu gets its next tick, so a fast write (Mifare/NFC-V, ~2-3s) would show the "in
 // progress" screen and then no result at all. pn5180Task therefore latches the result
@@ -1090,12 +1100,12 @@ static void flowReset(bool rearmSameTag = true) {
   g_flowLookupByCode = false;
   g_flowLookupUid = "";
   // rearmSameTag: clear the "already handled" latch so the very same tag triggers the
-  // flow again on the next poll. Right when the tag was REMOVED (the poll's goneStreak
+  // flow again on the next poll. Right when the tag was REMOVED (the poll's goneSince
   // path) -- the next placement must be seen as new, even if it is the same spool.
   //
   // WRONG when the user backed out of the flow with the tag still ON the reader: the
-  // latch would clear, the next poll (500 ms) would see a "new" tag and reopen the very
-  // menu the user just dismissed, roughly every 1.5 s. That also froze the weight
+  // latch would clear, the next poll tick would see a "new" tag and reopen the very
+  // menu the user just dismissed, over and over. That also froze the weight
   // readout, because flowOnTagPresent does a BLOCKING DB/OctoPrint lookup. The user
   // could never reach the live scale display to update a spool's weight on the device
   // -- the same task that draws the weight was stuck in HTTP. Keep the latch in that
@@ -1739,7 +1749,7 @@ void startWebServer() {
     }
     // Chip-level health/diagnostic status (not tag-related, doesn't need a tag present)
     // -- only read in debug mode, since it's a handful of extra SPI round-trips on
-    // every 500ms poll otherwise pointless outside diagnostics.
+    // every poll tick otherwise pointless outside diagnostics.
     if (g_nfcDebug && pn5180IsReady()) {
       PN5180ChipStatus cs = pn5180ReadChipStatus();
       JsonObject chip = doc["chip"].to<JsonObject>();
@@ -3077,8 +3087,12 @@ static void flowOnTagPresent(long id, const String &uid) {
 
 // Tag is gone -> clear a pending flow (end states reset right after debouncing,
 // selection states only after g_flowAskTimeoutSec). Active states + WEIGH_CONFIRM are
-// left untouched. Debounced via a persistent counter (a static owned by the caller).
-static void flowOnTagGone(uint8_t &goneStreak) {
+// left untouched. Debounced via a persistent timestamp (a static owned by the caller):
+// goneSince is the millis() of the first poll that saw the tag missing, 0 = present.
+// Deliberately time-based, NOT a count of poll ticks -- the tick form pinned these
+// durations to the poll cadence, so changing PN5180_POLL_INTERVAL_MS silently doubled
+// how long an error message stayed on screen.
+static void flowOnTagGone(unsigned long &goneSince) {
   unsigned long &askGoneSince = *(unsigned long *)&g_flowAskGoneSince;
   bool endState = (g_flowState == FLOW_DONE || g_flowState == FLOW_UNKNOWN ||
                    g_flowState == FLOW_ERROR);
@@ -3086,16 +3100,16 @@ static void flowOnTagGone(uint8_t &goneStreak) {
                    g_flowState == FLOW_ASK_TOOL);
   if (endState) {
     askGoneSince = 0;
-    // FLOW_ERROR gets extra time on screen (poll is 500ms -> ~8s) so the message is
-    // actually readable; DONE/UNKNOWN reset quickly as before (~1.5s).
-    uint8_t neededStreak = (g_flowState == FLOW_ERROR) ? 16 : 3;
-    if (++goneStreak >= neededStreak) {
-      goneStreak = 0;
+    // FLOW_ERROR stays up long enough to actually read; DONE/UNKNOWN clear quickly.
+    unsigned long neededMs = (g_flowState == FLOW_ERROR) ? 8000UL : 1500UL;
+    if (goneSince == 0) goneSince = millis();
+    if (millis() - goneSince >= neededMs) {
+      goneSince = 0;
       Serial.println("Tag removed -> flow reset (idle)");
       flowReset();
     }
   } else if (askState) {
-    goneStreak = 0;
+    goneSince = 0;
     if (g_flowAskTimeoutSec == 0) {
       askGoneSince = 0;
     } else {
@@ -3107,7 +3121,7 @@ static void flowOnTagGone(uint8_t &goneStreak) {
       }
     }
   } else {
-    goneStreak = 0;
+    goneSince = 0;
     askGoneSince = 0;
   }
 }
@@ -3326,7 +3340,7 @@ void dbPingTask(void *param) {
 // while-loops -> a reader hang only freezes this task, not the web UI. Encoder
 // debouncing runs here too (lightweight, same cadence).
 void pn5180Task(void *param) {
-  static uint8_t s3GoneStreak = 0;
+  static unsigned long s3GoneSince = 0;  // millis() of first poll with no tag, 0 = present
   for (;;) {
     // 0) Handle the encoder + buttons FIRST (every task iteration, ~100 Hz), BEFORE
     //    the blocking NFC read. Otherwise a slow PN5180 read (a present/shaky tag
@@ -3774,7 +3788,8 @@ void pn5180Task(void *param) {
       }
     }
 
-    // 2) Tag poll every 500ms. Skipped entirely while the screen preview is active: the
+    // 2) Tag poll every PN5180_POLL_INTERVAL_MS. Skipped entirely while the screen
+    // preview is active: the
     // preview promises "read-only, no NFC/octo/HTTP call is ever made while this is
     // active" (see menuPreviewDraw's comment), but the poll -- and everything a real
     // tag triggers underneath it (flowOnTagPresent -> DB check -> blocking OctoPrint
@@ -3783,9 +3798,9 @@ void pn5180Task(void *param) {
     // during preview auto-cycling: a tag placed on the reader mid-preview quietly
     // walked all the way through the load flow while the screen showed an unrelated
     // preview frame. lastPoll is deliberately NOT updated here, so polling resumes
-    // immediately (not delayed by up to 500ms) once the preview ends.
+    // immediately (not delayed by up to one poll interval) once the preview ends.
     static uint32_t lastPoll = 0;
-    if (!g_menuPreviewActive && millis() - lastPoll >= 500) {
+    if (!g_menuPreviewActive && millis() - lastPoll >= PN5180_POLL_INTERVAL_MS) {
       lastPoll = millis();
       if (g_nfcDebug) {
         // DEBUG MODE: reads + determines the tag TYPE (NFC-V and NFC-A), no flow.
@@ -3890,7 +3905,7 @@ void pn5180Task(void *param) {
         long id;
         String uidHex, idText;
         if (pn5180ReadSpool(type, id, uidHex, idText)) {
-          s3GoneStreak = 0;
+          s3GoneSince = 0;
           g_pn5180Present = true;
           g_pn5180Uid = uidHex;
           g_nfcProbe.type = type;  // tag type for the TFT (short readout under the weight)
@@ -4034,7 +4049,7 @@ void pn5180Task(void *param) {
           g_nfcProbe = PN5180ProbeResult();  // reset the short type readout
           g_lastUid = "";
           g_lastTagData = "";
-          flowOnTagGone(s3GoneStreak);
+          flowOnTagGone(s3GoneSince);
         }
       }
     }
