@@ -147,7 +147,16 @@ The one exception is an extended tag written before its carrier gained the colou
 | NFC-V Extended | **v3** | v4 | `isV3nfcv` |
 | NTAG Extended | **v2** | v3 | `fixedBuf[2] >= 0x02` |
 
-Below its gate, a carrier's colour field is left empty; at or above it, the flag byte is authoritative and `colorCount` says how many colours are set. The gate governs only this ambiguity — a tag below the gate still reads its primary colour when the bytes are non-zero.
+The gate governs only this ambiguity, not the colour field as a whole. Four cases, which is the whole behaviour:
+
+| Tag | Bytes | Result |
+| --- | --- | --- |
+| Below gate | non-zero | the colour — a pre-gate tag still reports its primary colour |
+| Below gate | `0,0,0` | empty — black and unset are indistinguishable here |
+| At/above gate, `colorCount >= 1` | `0,0,0` | `#000000` — the flag byte confirms a colour is set, so this is black |
+| At/above gate, `colorCount == 0` | any | empty — the flag byte positively states "no colour" |
+
+The last row looks like a bug and is not: above the gate, `colorCount == 0` is an assertion that no colour is set, not a gap in the data. It is also the state a bare `transparent` spool is in, which is why the primary bytes must not be written into slot 0 there.
 
 Formats that encode absence explicitly have no such ambiguity and are never gated: OpenSpool and OpenPrintTag omit the field entirely when no colour is set (a missing JSON key / CBOR key 19), so zero bytes there are unambiguously black. TigerTag has no "not set" sentinel at all — `0,0,0` is black, and byte 19 is alpha, not a presence marker.
 
