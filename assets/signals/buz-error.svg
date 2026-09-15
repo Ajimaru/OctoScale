@@ -1,0 +1,8 @@
+<svg viewBox="0 0 300 90" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Unknown / offline: 2 tone segments, 510ms total">
+  <title>Unknown / offline</title>
+  <rect width="300" height="90" rx="8" fill="#14120f"/>
+  <line x1="12" y1="62" x2="288" y2="62" stroke="#34312b" stroke-width="1"/>
+  <rect x="12.0" y="32" width="86.6" height="30" fill="#ef4136" rx="1.5"/><rect x="147.3" y="32" width="140.7" height="30" fill="#ef4136" rx="1.5"/><text x="55.3" y="26" font-size="9" fill="#ef4136" text-anchor="middle" font-family="ui-monospace,monospace">1400Hz</text><text x="55.3" y="75" font-size="9" fill="#8f887a" text-anchor="middle" font-family="ui-monospace,monospace">160ms</text><text x="122.9" y="75" font-size="8" fill="#55514a" text-anchor="middle" font-family="ui-monospace,monospace">90</text><text x="217.6" y="26" font-size="9" fill="#ef4136" text-anchor="middle" font-family="ui-monospace,monospace">1400Hz</text><text x="217.6" y="75" font-size="9" fill="#8f887a" text-anchor="middle" font-family="ui-monospace,monospace">260ms</text>
+  <text x="12" y="80" font-size="10" fill="#ede8dc" font-family="ui-monospace,monospace">Unknown / offline</text>
+  <text x="288" y="80" font-size="9" fill="#8f887a" text-anchor="end" font-family="ui-monospace,monospace">510ms</text>
+</svg>

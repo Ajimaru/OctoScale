@@ -1,0 +1,8 @@
+<svg viewBox="0 0 300 90" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tag detected: 1 tone segment, 45ms total">
+  <title>Tag detected</title>
+  <rect width="300" height="90" rx="8" fill="#14120f"/>
+  <line x1="12" y1="62" x2="288" y2="62" stroke="#34312b" stroke-width="1"/>
+  <rect x="12.0" y="32" width="276.0" height="30" fill="#00cccc" rx="1.5"/><text x="150.0" y="26" font-size="9" fill="#00cccc" text-anchor="middle" font-family="ui-monospace,monospace">3000Hz</text><text x="150.0" y="75" font-size="9" fill="#8f887a" text-anchor="middle" font-family="ui-monospace,monospace">45ms</text>
+  <text x="12" y="80" font-size="10" fill="#ede8dc" font-family="ui-monospace,monospace">Tag detected</text>
+  <text x="288" y="80" font-size="9" fill="#8f887a" text-anchor="end" font-family="ui-monospace,monospace">45ms</text>
+</svg>

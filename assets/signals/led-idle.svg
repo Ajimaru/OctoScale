@@ -1,0 +1,14 @@
+<svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Connected and idle - status LED">
+  <title>Connected and idle</title>
+  <defs>
+    <radialGradient id="g-led-idle">
+      <stop offset="0%" stop-color="#22c55e" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#22c55e" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="120" height="120" rx="14" fill="#0a0908"/>
+  <g>
+    <circle cx="60" cy="60" r="42" fill="url(#g-led-idle)"><animate attributeName="opacity" values="0.18;1;0.18" dur="4s" repeatCount="indefinite"/><animate attributeName="r" values="17.2;20;17.2" dur="4s" repeatCount="indefinite"/></circle>
+    <circle cx="60" cy="60" r="20" fill="#22c55e"><animate attributeName="opacity" values="0.18;1;0.18" dur="4s" repeatCount="indefinite"/><animate attributeName="r" values="17.2;20;17.2" dur="4s" repeatCount="indefinite"/></circle>
+  </g>
+</svg>
