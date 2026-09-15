@@ -2296,8 +2296,19 @@ inline String pn5180BuildOpenSpoolJson(const SpoolTagData &d, int budgetBytes, S
   if (d.temperatureMax >= 0) snprintf(hotMax, sizeof(hotMax), "%d", d.temperatureMax);
   if (d.bedTemperatureMin >= 0) snprintf(bedMin, sizeof(bedMin), "%d", d.bedTemperatureMin);
   if (d.bedTemperatureMax >= 0) snprintf(bedMax, sizeof(bedMax), "%d", d.bedTemperatureMax);
+  // OpenSpool's color_hex holds ONE colour, no leading '#' per its spec. Must go through
+  // pn5180PrimaryColorRgb like every other writer: a plain substring(1) of d.color took
+  // the grammar string apart wrongly -- "transparent:#FF0000" became the literal
+  // "ransparent:#FF0000", i.e. invalid JSON content on the tag.
   String colorHex = "";
-  if (d.color.length() >= 7 && d.color[0] == '#') colorHex = d.color.substring(1);  // no leading '#' per OpenSpool spec
+  {
+    uint8_t rgb[3];
+    if (pn5180PrimaryColorRgb(d, rgb)) {
+      char hx[8];
+      snprintf(hx, sizeof(hx), "%02X%02X%02X", rgb[0], rgb[1], rgb[2]);
+      colorHex = hx;
+    }
+  }
 
   Field fields[] = {
     { "\"protocol\"",     "\"openspool\"", false, true },
