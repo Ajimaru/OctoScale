@@ -90,7 +90,18 @@ The external 5 V supply powers the PN5180 RF section and TFT. A regulated 3.3 V 
 
 The PN5180 needs a 470 uF capacitor directly across its 5 V and ground pins. RF current spikes can otherwise collapse the supply and appear as a software or SPI failure. Do not power the ESP32-S3 from USB while an external 5 V supply is connected to its 5 V/VBUS/VIN input.
 
-Buffer the board's own supply as well: an electrolytic capacitor of at least 1000 uF across the 5 V pin and ground, and a smaller one around 100 uF across the 3.3 V pin and ground, both with short leads. WiFi transmit bursts draw current faster than a thin cable can deliver it, and the 3.3 V rail the brownout detector watches is fed from the 5 V input, so a dip on 5 V pulls it down too. Keep the 3.3 V capacitor small: the regulator carries its charge current at boot and does not like a large output capacitance.
+Buffer the ESP32-S3 board's own supply as well. The reference build uses:
+
+| Position | Part | Rating |
+| --- | --- | --- |
+| Board `5V` to `GND` | 1500 uF electrolytic | 10 V or higher |
+| Board `3V3` to `GND` | 100 uF electrolytic | 16 V or higher |
+
+Mount both with the shortest possible leads, directly at the pins — a capacitor a few centimetres away on a breadboard rail buys very little, because the lead inductance undoes it. Observe polarity; a reversed electrolytic can vent.
+
+WiFi transmit bursts draw current faster than a thin cable can deliver it, and every 3.3 V consumer is derived from the same 5 V input, so a dip there propagates to the whole board. Sizing: a transmit burst is roughly 300 mA for about 2 ms, so holding it to a 0.2 V dip would need about 3000 uF. 1500 uF does not cover that fully but damps it hard, and is the sensible stopping point — more capacitance mainly buys inrush trouble. Keep the 3.3 V capacitor deliberately small: that rail carries logic loads only, and a large capacitance at the far end of the buck converter raises its inrush at power-on without helping the bursts. Bulk buffering belongs on 5 V, where the current is actually drawn.
+
+Ceramic 100 nF capacitors in parallel with each electrolytic are good practice against high-frequency noise, but they are not what fixes brownouts — the electrolytics handle the slow, large dips. The reference build runs without them.
 
 Watch the supply path itself, not just the power supply's rating. Every connector, switch, and metre of thin cable between the supply and the board adds series resistance, and a chain of them can limit a burst badly enough to reset the device while a multimeter still reads a healthy idle voltage. If the device resets unpredictably, read `resetReason` from `/system` first: value 9 is a brownout and points at the supply path rather than at firmware. Prefer a short, thick, direct connection, and put any remote power switching on the mains side of the 5 V supply rather than in the low-voltage path.
 

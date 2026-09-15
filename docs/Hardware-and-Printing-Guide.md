@@ -16,7 +16,9 @@ This guide lists the hardware to buy and the printed parts to produce before ass
 | 1 | PN5180 NFC module | Supports NFC-A and NFC-V/OpenPrintTag |
 | 1 | ST7789 TFT 320x240 with EC11 encoder and 2 buttons | S11-05 combo module |
 | 1 | Passive buzzer | Driven by LEDC PWM |
-| 1 | 470 uF electrolytic capacitor | Mandatory; install at the PN5180 5 V input |
+| 1 | 470 uF electrolytic capacitor, 10 V+ | Mandatory; install at the PN5180 5 V input |
+| 1 | 1500 uF electrolytic capacitor, 10 V+ | Mandatory; buffers the ESP32-S3 board's 5 V pin |
+| 1 | 100 uF electrolytic capacitor, 16 V+ | Mandatory; buffers the ESP32-S3 board's 3.3 V pin |
 | 1 | USB-C power supply | 5 V, at least 1.5 A |
 | 1 | USB-C breakout board | Main 5 V entry point |
 | 1 | Mini-360 buck converter | Adjust output to 3.3 V before connecting loads |

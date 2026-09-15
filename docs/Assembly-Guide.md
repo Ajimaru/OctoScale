@@ -12,7 +12,19 @@ All pin numbers below are GPIO numbers and match `src/main.cpp`. The PN5180 and 
 
 Power enters through the USB-C breakout. The 5 V rail powers the ESP32-S3, PN5180 RF section, and TFT. The Mini-360 converts 5 V to 3.3 V for the HX711, PN5180 logic, and external WS2812. Everything shares one ground.
 
-Before connecting any load, feed the Mini-360 with 5 V and adjust `OUT+` to exactly 3.3 V with a multimeter. Connect the 470 uF capacitor directly across PN5180 `#5V` and `GND`.
+Before connecting any load, feed the Mini-360 with 5 V and adjust `OUT+` to exactly 3.3 V with a multimeter.
+
+Then fit the three electrolytic capacitors. All of them mount with short leads directly at the pins they buffer — a few centimetres of wire undoes most of the benefit — and all are polarised, so check the negative stripe before powering up.
+
+| Capacitor | Across |
+| --- | --- |
+| 470 uF | PN5180 `#5V` and `GND` |
+| 1500 uF | ESP32-S3 `5V` and `GND` |
+| 100 uF | ESP32-S3 `3V3` and `GND` |
+
+The 470 uF one is what lets the PN5180 raise an RF field at all; without it the reader only detects tags sporadically. The other two keep the board's own supply steady through WiFi transmit bursts. Skipping them tends to show up as unexplained reboots rather than as an obvious power problem — see the Development Guide for how to tell a brownout from a firmware fault.
+
+Keep the wiring from the power supply to the board short and thick, and avoid chaining adapters, meters, or USB switches into the 5 V path. Each connector adds resistance, and enough of them will starve a current burst even though the supply itself is adequately rated.
 
 Never power the ESP32-S3 from USB while external 5 V is connected to its `5V`/`VBUS`/`VIN` pin. Disconnect the external supply for the first USB flash and any later recovery flash.
 
