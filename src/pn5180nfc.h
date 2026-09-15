@@ -373,6 +373,62 @@ inline void pn5180ParseColorGrammar(const String &color, uint8_t rgbOut[3][3],
   }
 }
 
+// Inverse of pn5180ParseColorGrammar: rebuilds the grammar string from the parsed
+// parts. Must stay an exact mirror of the parser above, or a /nfcprobe result fed back
+// into /nfcwritespool would not round-trip. "transparent" with zero colours is a
+// legitimate state (untinted), see the colorCount comment on SpoolTagData.
+inline String pn5180ComposeColorGrammar(const uint8_t rgb[3][3], uint8_t count,
+                                        bool transparent, bool rainbow) {
+  if (rainbow) return String("rainbow");   // parser returns early on it too, count ignored
+  String out;
+  if (transparent) out = "transparent";
+  if (count == 0) return out;              // "" or bare "transparent"
+  char hx[10];
+  for (uint8_t i = 0; i < count && i < 3; i++) {
+    snprintf(hx, sizeof(hx), "#%02X%02X%02X", rgb[i][0], rgb[i][1], rgb[i][2]);
+    out += (i == 0) ? (transparent ? ":" : "") : ";";
+    out += hx;
+  }
+  return out;
+}
+
+// Single decode point for the primary colour of the three Extended carriers.
+//
+// Why this exists rather than a condition at each read site: the primary colour's three
+// bytes carry no "unset" encoding of their own -- black is 0,0,0, and so is an untouched
+// buffer. The only authority on whether a colour was stored is the flag byte's
+// colorCount (see pn5180PackColorFlags), and that byte lives in a different block/page
+// that is itself version-gated and read further down. Deciding at the byte site is
+// therefore guessing; this runs once the flags are actually in hand.
+//
+// haveFlags=false means the tag predates its carrier's flag byte (Mifare < v4,
+// NFC-V < v3, NTAG < v2 -- the counters run per carrier and do NOT line up). There the
+// information was never written, so black and unset are indistinguishable: fall back to
+// the historic "non-zero means set" reading and leave 0,0,0 empty rather than inventing
+// a black that could overwrite a real spool colour on import.
+inline void pn5180ApplyExtendedColor(SpoolTagData &out, const uint8_t primary[3],
+                                     bool haveFlags, uint8_t flagByte) {
+  if (haveFlags) {
+    pn5180UnpackColorFlags(flagByte, out);
+    // colorCount==0 with isTransparent is valid ("transparent", untinted) -- must not
+    // be overwritten with the zeroed primary bytes.
+    if (out.colorCount >= 1)
+      for (int i = 0; i < 3; i++) out.colorRgb[0][i] = primary[i];
+  } else if (primary[0] || primary[1] || primary[2]) {
+    for (int i = 0; i < 3; i++) out.colorRgb[0][i] = primary[i];
+    out.colorCount = 1;
+  }
+  // out.color stays the PRIMARY colour as plain "#RRGGBB" -- the full grammar is what
+  // colorFull carries (see /nfcprobe). Widening this field would change a published
+  // value the web UI displays.
+  if (out.colorCount >= 1) {
+    char hx[10];
+    snprintf(hx, sizeof(hx), "#%02X%02X%02X",
+             out.colorRgb[0][0], out.colorRgb[0][1], out.colorRgb[0][2]);
+    out.color = hx;
+  }
+}
+
 // Primary colour for the single-RGB slot every carrier has had since v1. Prefers the
 // already-parsed grammar result (d.colorRgb[0]) over re-parsing d.color, because
 // pn5180ParseColorHex alone returns false for "transparent:#ff0000;..." -- the string
@@ -2095,29 +2151,23 @@ inline bool pn5180ReadMifareExtended(const String &uidHex, SpoolTagData &out) {
   out.offsetTemperature          = (int8_t)block9[7];
   out.offsetBedTemperature       = (int8_t)block9[8];
   out.offsetEnclosureTemperature = (int8_t)block9[9];
-  if (block9[10] || block9[11] || block9[12]) {
-    char buf[8];
-    snprintf(buf, sizeof(buf), "#%02X%02X%02X", block9[10], block9[11], block9[12]);
-    out.color = buf;
-  }
+  // Primary colour bytes: captured raw, decoded below once the flag byte is available.
+  const uint8_t primaryRgb[3] = { block9[10], block9[11], block9[12] };
   if (isV2) {
     out.temperatureMin    = (block9[13] == 0xFF) ? -1 : block9[13];
     out.temperatureMax    = (block9[14] == 0xFF) ? -1 : block9[14];
     out.bedTemperatureMin = (block10[0] == 0xFF) ? -1 : block10[0];
     out.bedTemperatureMax = (block10[1] == 0xFF) ? -1 : block10[1];
     if (isV4) {
-      pn5180UnpackColorFlags(block10[8], out);
       for (int i = 0; i < 3; i++) {
         out.colorRgb[1][i] = block10[2 + i];
         out.colorRgb[2][i] = block10[5 + i];
       }
-      // Colour 1 lives in block 9 (read into out.color above as "#rrggbb"); mirror it
-      // into slot 0 so colorRgb[] is complete rather than having a hole at index 0.
-      uint8_t c0[3];
-      if (pn5180ParseColorHex(out.color, c0))
-        for (int i = 0; i < 3; i++) out.colorRgb[0][i] = c0[i];
     }
   }
+  // MUST stay outside the isV2/isV4 blocks: a pre-v4 tag has no flag byte but can still
+  // carry a colour, and gating this call would drop it entirely.
+  pn5180ApplyExtendedColor(out, primaryRgb, isV4, isV4 ? block10[8] : 0);
   if (isV3) {
     out.remainingWeight = pn5180UnscaleU16((uint16_t)(block16[0] | (block16[1] << 8)), 1.0f);
     out.totalLength = pn5180UnscaleU24((uint32_t)(block16[2] | (block16[3] << 8) | (block16[4] << 16)));
@@ -2432,7 +2482,13 @@ inline bool pn5180ReadNtagOpenSpool(SpoolTagData &out) {
       out.material = String((const char *)(doc["type"] | ""));
       out.vendor = String((const char *)(doc["brand"] | ""));
       const char *ch = doc["color_hex"] | "";
-      if (ch && ch[0]) out.color = String("#") + ch;
+      // OpenSpool encodes "no colour" by omitting the key, so a present "000000" is
+      // black -- no zero-check here. colorCount is set so colorFull carries it too, but
+      // only if the hex actually parses: color_hex is arbitrary JSON and may be junk.
+      if (ch && ch[0]) {
+        out.color = String("#") + ch;
+        if (pn5180ParseColorHex(out.color, out.colorRgb[0])) out.colorCount = 1;
+      }
       float w = doc["weight"] | -1.0f; if (w > 0) out.totalWeight = w;
       float dia = doc["diameter"] | -1.0f; if (dia > 0) out.diameter = dia;
       int mn = doc["min_temp"] | -1; if (mn >= 0) out.temperatureMin = mn;
@@ -2731,11 +2787,8 @@ inline bool pn5180ReadNfcvExtended(const uint8_t uid[8], SpoolTagData &out) {
   out.offsetTemperature          = (int8_t)physBuf[7];
   out.offsetBedTemperature       = (int8_t)physBuf[8];
   out.offsetEnclosureTemperature = (int8_t)physBuf[9];
-  if (physBuf[10] || physBuf[11] || physBuf[12]) {
-    char buf[8];
-    snprintf(buf, sizeof(buf), "#%02X%02X%02X", physBuf[10], physBuf[11], physBuf[12]);
-    out.color = buf;
-  }
+  // Primary colour bytes: captured raw, decoded below once the flag byte is available.
+  const uint8_t primaryRgb[3] = { physBuf[10], physBuf[11], physBuf[12] };
   if (isV2) {
     out.temperatureMin    = (physBuf[14] == 0xFF) ? -1 : physBuf[14];
     out.temperatureMax    = (physBuf[15] == 0xFF) ? -1 : physBuf[15];
@@ -2743,15 +2796,13 @@ inline bool pn5180ReadNfcvExtended(const uint8_t uid[8], SpoolTagData &out) {
     out.bedTemperatureMax = (tempRangeBuf[1] == 0xFF) ? -1 : tempRangeBuf[1];
   }
   if (haveCol) {
-    pn5180UnpackColorFlags(colBuf[3], out);
     for (int i = 0; i < 3; i++) {
       out.colorRgb[1][i] = colBuf[i];
       out.colorRgb[2][i] = col2Buf[i];
     }
-    uint8_t c0[3];
-    if (pn5180ParseColorHex(out.color, c0))
-      for (int i = 0; i < 3; i++) out.colorRgb[0][i] = c0[i];
   }
+  // MUST stay outside the haveCol block -- see the Mifare reader's note.
+  pn5180ApplyExtendedColor(out, primaryRgb, haveCol, haveCol ? colBuf[3] : 0);
 
   if (isV4nfcv) {
     out.dryingTemperature = pn5180UnscaleDryTemp(dryBuf[0]);
@@ -3138,7 +3189,17 @@ inline bool pn5180ReadNtagTigerTag(SpoolTagData &out) {
   out.tigerTagDiameterId = (long)buf[13];
   out.tigerTagBrandId = (long)((buf[14] << 8) | buf[15]);
 
-  if (buf[16] || buf[17] || buf[18]) {
+  // No gate on the bytes here, deliberately: this is a fixed foreign layout with no
+  // documented NOT_SET sentinel for the colour (see the writer's own note), so 0,0,0 is
+  // black -- treating it as "unset" dropped the colour of every black spool, and unlike
+  // the Extended carriers there is no flag byte to consult. buf[19] is alpha, which we
+  // always write as 0xFF; it is NOT usable as a presence marker either, since a foreign
+  // writer may legitimately leave it at 0x00.
+  out.colorRgb[0][0] = buf[16];
+  out.colorRgb[0][1] = buf[17];
+  out.colorRgb[0][2] = buf[18];
+  out.colorCount = 1;
+  {
     char hex[8]; snprintf(hex, sizeof(hex), "#%02X%02X%02X", buf[16], buf[17], buf[18]);
     out.color = String(hex);
   }
@@ -3207,10 +3268,8 @@ inline bool pn5180ReadNtagExtended(SpoolTagData &out) {
   out.offsetBedTemperature = (int8_t)phys2[2];
   out.offsetEnclosureTemperature = (int8_t)phys2[3];
   uint8_t *phys3 = fp(NTAG_EXT_PAGE_PHYS + 2);
-  if (phys3[0] || phys3[1] || phys3[2]) {
-    char hex[8]; snprintf(hex, sizeof(hex), "#%02X%02X%02X", phys3[0], phys3[1], phys3[2]);
-    out.color = String(hex);
-  }
+  // Primary colour bytes: captured raw, decoded below once the flag byte is available.
+  const uint8_t primaryRgb[3] = { phys3[0], phys3[1], phys3[2] };
   out.temperatureMax = (phys3[3] == 0xFF) ? -1 : phys3[3];
 
   uint8_t *tmin = fp(NTAG_EXT_PAGE_TEMPMIN);
@@ -3245,18 +3304,19 @@ inline bool pn5180ReadNtagExtended(SpoolTagData &out) {
   out.purchasedOnMinuteOfDay = pn5180UnscaleMinuteOfDay(datesp2[2] | (datesp2[3] << 8));
   // v2 multi-colour. Version-gated: on a v1 tag pages 19-20 are the first two STRING
   // pages, so reading colours from them would produce garbage RGB from UTF-8 bytes.
-  if (fixedBuf[2] >= 0x02) {   // fixedBuf[2] = the version byte on page 4
+  bool haveColorFlags = (fixedBuf[2] >= 0x02);   // fixedBuf[2] = the version byte on page 4
+  uint8_t colorFlagByte = 0;
+  if (haveColorFlags) {
     uint8_t *colp = fp(NTAG_EXT_PAGE_COLOR);
     uint8_t *colp2 = fp(NTAG_EXT_PAGE_COLOR + 1);
-    pn5180UnpackColorFlags(colp[3], out);
+    colorFlagByte = colp[3];
     for (int i = 0; i < 3; i++) {
       out.colorRgb[1][i] = colp[i];
       out.colorRgb[2][i] = colp2[i];
     }
-    uint8_t c0[3];
-    if (pn5180ParseColorHex(out.color, c0))
-      for (int i = 0; i < 3; i++) out.colorRgb[0][i] = c0[i];
   }
+  // MUST stay outside the version block -- see the Mifare reader's note.
+  pn5180ApplyExtendedColor(out, primaryRgb, haveColorFlags, colorFlagByte);
 
   // v3 drying/td, pages 21-22. Version-gated for the same reason as the colours above,
   // only sharper: on a v2 tag those pages are the first two STRING pages, so decoding
@@ -3479,7 +3539,13 @@ inline bool pn5180ReadNfcvOpenSpool(const uint8_t uid[8], SpoolTagData &out) {
       out.material = String((const char *)(doc["type"] | ""));
       out.vendor = String((const char *)(doc["brand"] | ""));
       const char *ch = doc["color_hex"] | "";
-      if (ch && ch[0]) out.color = String("#") + ch;
+      // OpenSpool encodes "no colour" by omitting the key, so a present "000000" is
+      // black -- no zero-check here. colorCount is set so colorFull carries it too, but
+      // only if the hex actually parses: color_hex is arbitrary JSON and may be junk.
+      if (ch && ch[0]) {
+        out.color = String("#") + ch;
+        if (pn5180ParseColorHex(out.color, out.colorRgb[0])) out.colorCount = 1;
+      }
       float w = doc["weight"] | -1.0f; if (w > 0) out.totalWeight = w;
       float dia = doc["diameter"] | -1.0f; if (dia > 0) out.diameter = dia;
       int mn = doc["min_temp"] | -1; if (mn >= 0) out.temperatureMin = mn;

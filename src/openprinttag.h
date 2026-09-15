@@ -346,6 +346,12 @@ inline bool optRead(const uint8_t uid[8], SpoolTagData &out) {
           if (vh.majorType == CBOR_MT_BYTES && vh.arg >= 3 && pos + (int)vh.arg <= layout.mainSize) {
             char cbuf[8]; snprintf(cbuf, sizeof(cbuf), "#%02X%02X%02X", buf[pos], buf[pos+1], buf[pos+2]);
             out.color = cbuf;
+            // Key 19 being present IS the presence marker here (CBOR map semantics), so
+            // 0,0,0 is black. Fill the struct slot too, so colorFull carries the colour.
+            out.colorRgb[0][0] = buf[pos];
+            out.colorRgb[0][1] = buf[pos+1];
+            out.colorRgb[0][2] = buf[pos+2];
+            out.colorCount = 1;   // alpha (4th byte, when sent) has no field here
             pos += (int)vh.arg;
           } else cborSkipValue(buf, pos, layout.mainSize, vh);
           break; }
