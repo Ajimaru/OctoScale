@@ -133,9 +133,57 @@ Keep NFC work asynchronous at the HTTP boundary: start operations with the exist
 
 A spool colour is expressed as a small grammar rather than a single hex value: `#RRGGBB`, up to three colours separated by `;`, an optional leading `transparent:` prefix, the bare word `transparent` for an untinted spool, or the bare word `rainbow`.
 
+Composition is the exact inverse of parsing, so a `colorFull` read back and written again is unchanged:
+
+| `isRainbow` | `isTransparent` | `colorCount` | `colorFull` |
+| --- | --- | --- | --- |
+| true | any | any | `rainbow` |
+| false | true | 0 | `transparent` |
+| false | true | 2 | `transparent:#000000;#FFFFFF` |
+| false | false | 1 | `#000000` |
+| false | false | 0 | no colour — see below |
+
+`transparent` with `colorCount == 0` is a legitimate state, not a missing value: an untinted transparent spool has no primary colour to report. A composer must not emit `#000000` there — the zeroed primary slot is unset, not black.
+
+The last row is the one case where the grammar says nothing about representation, only about state. This firmware always emits the key with an empty string; a consumer that distinguishes "absent" from "present but empty" — the OctoPrint plugin omits the key entirely — is equally correct. **Treat an empty `colorFull` and an absent one as the same thing.** Neither is a colour, and reading one as the negation of the other invents a distinction the grammar does not make.
+
+A consumer falling back to another field must test for **absence**, not for falsyness:
+
+```js
+const c = colorFull != null ? colorFull : color;   // correct
+const c = colorFull ? colorFull : color;           // wrong: "" falls through
+```
+
+Both spellings behaved identically while black was still dropped on read, because a black spool left every colour field empty. Since black reads back as `#000000`, they diverge: the falsy test sends a legitimately colourless spool to a fallback field that is also empty, and on formats where `color` is populated it can resurrect a stale value the grammar had deliberately cleared. This is a live trap for anything written against the older behaviour.
+
+> **Release note owed.** The black-colour fix is not in any tagged release yet — it landed after `v0.0.2`. The first release that carries it needs to say more than "black is now read correctly", because the fix changes what an existing consumer sees: **anything that treated an empty colour field as "no colour" now receives `#000000` for black spools, and a falsy fallback on `colorFull` starts behaving differently than before.** A consumer written against the old behaviour breaks silently, without an error or a visible symptom, which is exactly the kind of change that has to be announced rather than discovered.
+
 **`colorFull` is the field to rely on.** It carries the complete colour information for every tag format and can be written back verbatim. `extended.color` is deliberately narrower — the primary colour as plain `#RRGGBB`, and empty for `rainbow` or bare `transparent`, which have no primary colour. `colorCount`, `colors[]`, `isTransparent`, and `isRainbow` expose the parsed parts so consumers need not re-parse the grammar.
 
-Black is a real colour, not a missing one: a black spool reads back as `#000000`. The one exception is an extended tag written before its carrier gained the colour-flag byte — Mifare v4, NFC-V v3, NTAG v2. On those older tags "black" and "no colour set" are the same bytes and cannot be told apart, so the field stays empty rather than guessing a colour that could overwrite a real one on import.
+Black is a real colour, not a missing one: a black spool reads back as `#000000`. Three zero bytes mean black, never "unset" — the older reading, which treated `0,0,0` as absence, silently dropped every black spool.
+
+The one exception is an extended tag written before its carrier gained the colour-flag byte. On those tags "black" and "no colour set" are genuinely the same bytes and cannot be told apart, so the field stays empty rather than guessing a colour that could overwrite a real one on import.
+
+**The version counters run per carrier and do not line up.** Each carrier gained the flag byte at its own version number, so there is no single "from v4" rule — reading one carrier's threshold as if it applied to the others is the mistake this table exists to prevent:
+
+| Carrier | Colour flags from | Current version | Read-path gate |
+| --- | --- | --- | --- |
+| Mifare Classic Extended | **v4** | v5 | `block8[2] >= 0x04` |
+| NFC-V Extended | **v3** | v4 | `isV3nfcv` |
+| NTAG Extended | **v2** | v3 | `fixedBuf[2] >= 0x02` |
+
+The gate governs only this ambiguity, not the colour field as a whole. Four cases, which is the whole behaviour:
+
+| Tag | Bytes | Result |
+| --- | --- | --- |
+| Below gate | non-zero | the colour — a pre-gate tag still reports its primary colour |
+| Below gate | `0,0,0` | empty — black and unset are indistinguishable here |
+| At/above gate, `colorCount >= 1` | `0,0,0` | `#000000` — the flag byte confirms a colour is set, so this is black |
+| At/above gate, `colorCount == 0` | any | empty — the flag byte positively states "no colour" |
+
+The last row looks like a bug and is not: above the gate, `colorCount == 0` is an assertion that no colour is set, not a gap in the data. It is also the state a bare `transparent` spool is in, which is why the primary bytes must not be written into slot 0 there.
+
+Formats that encode absence explicitly have no such ambiguity and are never gated: OpenSpool and OpenPrintTag omit the field entirely when no colour is set (a missing JSON key / CBOR key 19), so zero bytes there are unambiguously black. TigerTag has no "not set" sentinel at all — `0,0,0` is black, and byte 19 is alpha, not a presence marker.
 
 ### Vendored PN5180 patches
 
