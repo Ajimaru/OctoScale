@@ -1800,6 +1800,30 @@ inline float pn5180UnscaleU16(uint16_t v, float scale, uint16_t notSet = 0xFFFF)
   return (float)v / scale;
 }
 
+// usedWeight and remainingWeight are not independent: the database keeps them so that
+// used + remaining == totalWeight. Rounding each to whole grams on its own breaks that
+// -- 646.6 and 353.4 both round up and the tag then claims 1001 g on a 1000 g spool,
+// a total the spool never had. So round usedWeight and derive remainingWeight from it,
+// which keeps the sum exact and holds each field within half a gram of the database.
+// Only applies when all three values are present; with totalWeight or either component
+// missing there is nothing to reconcile and both fall back to plain rounding.
+inline void pn5180ScaleWeightPair(float usedWeight, float remainingWeight, float totalWeight,
+                                  uint16_t &usedOut, uint16_t &remainingOut) {
+  usedOut = pn5180ScaleU16(usedWeight, 1.0f);
+  remainingOut = pn5180ScaleU16(remainingWeight, 1.0f);
+  if (usedWeight < 0 || remainingWeight < 0 || totalWeight < 0) return;
+  uint16_t totU = pn5180ScaleU16(totalWeight, 1.0f);
+  if (totU == 0xFFFF || usedOut == 0xFFFF || remainingOut == 0xFFFF) return;
+  if ((uint32_t)usedOut + remainingOut == totU) return;  // already consistent
+  // Derive the second field rather than rounding it. Guarded against a pair that
+  // doesn't belong to this total (a stale tag value paired with a fresh one): the
+  // correction is only applied when it stays within one gram of what was measured.
+  long derived = (long)totU - (long)usedOut;
+  if (derived < 0 || derived > 0xFFFE) return;
+  if (fabsf((float)derived - remainingWeight) > 1.0f) return;
+  remainingOut = (uint16_t)derived;
+}
+
 // Same not-set-sentinel convention as the u16 pair above, for fields needing more than
 // 16 bits of range (totalLength/usedLength, mm -- a 16-bit limit would cap filament
 // length at ~65 m, too small for real spools). 3 bytes LE, 0xFFFFFF reserved as the
@@ -1961,7 +1985,10 @@ inline bool pn5180WriteMifareExtended(const String &uidHex, const SpoolTagData &
 
   // --- v3: sector 4 (block 16), 7 packed numeric fields. ---
   uint8_t block16[16] = {0};
-  uint16_t remW = pn5180ScaleU16(d.remainingWeight, 1.0f);
+  // Rounded together with usedWeight even though that one lives in block 8 further
+  // down: the two have to add up to totalWeight, which independent rounding breaks.
+  uint16_t remW, useW;
+  pn5180ScaleWeightPair(d.usedWeight, d.remainingWeight, d.totalWeight, useW, remW);
   uint32_t totLen = pn5180ScaleU24(d.totalLength);
   uint32_t useLen = pn5180ScaleU24(d.usedLength);
   uint16_t fu = pn5180ScaleU16((float)d.firstUse, 1.0f);
@@ -2051,7 +2078,8 @@ inline bool pn5180WriteMifareExtended(const String &uidHex, const SpoolTagData &
   block8[6] = (uint8_t)(dbId >> 16);  block8[7] = (uint8_t)(dbId >> 24);
   uint16_t totW = pn5180ScaleU16(d.totalWeight, 1.0f);
   uint16_t spoW = pn5180ScaleU16(d.spoolWeight, 1.0f);
-  uint16_t useW = pn5180ScaleU16(d.usedWeight, 1.0f);
+  // useW comes from pn5180ScaleWeightPair above -- paired with remainingWeight so the
+  // two add up to totalWeight.
   uint16_t denU = pn5180ScaleU16(d.density, 1000.0f);
   block8[8]  = (uint8_t)(totW & 0xFF); block8[9]  = (uint8_t)(totW >> 8);
   block8[10] = (uint8_t)(spoW & 0xFF); block8[11] = (uint8_t)(spoW >> 8);
@@ -2935,8 +2963,8 @@ inline bool pn5180WriteNtagExtended(const SpoolTagData &d, int &bytesWrittenOut,
   uint16_t sw = pn5180ScaleU16(d.spoolWeight, 1.0f);
   fp(NTAG_EXT_PAGE_NUM)[0] = (uint8_t)(tw & 0xFF);  fp(NTAG_EXT_PAGE_NUM)[1] = (uint8_t)(tw >> 8);
   fp(NTAG_EXT_PAGE_NUM)[2] = (uint8_t)(sw & 0xFF);  fp(NTAG_EXT_PAGE_NUM)[3] = (uint8_t)(sw >> 8);
-  uint16_t uw = pn5180ScaleU16(d.usedWeight, 1.0f);
-  uint16_t rw = pn5180ScaleU16(d.remainingWeight, 1.0f);
+  uint16_t uw, rw;
+  pn5180ScaleWeightPair(d.usedWeight, d.remainingWeight, d.totalWeight, uw, rw);
   fp(NTAG_EXT_PAGE_NUM + 1)[0] = (uint8_t)(uw & 0xFF); fp(NTAG_EXT_PAGE_NUM + 1)[1] = (uint8_t)(uw >> 8);
   fp(NTAG_EXT_PAGE_NUM + 1)[2] = (uint8_t)(rw & 0xFF); fp(NTAG_EXT_PAGE_NUM + 1)[3] = (uint8_t)(rw >> 8);
 
