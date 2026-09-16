@@ -14,12 +14,16 @@
 [![Platform][badge-platform]](https://www.espressif.com/en/products/socs/esp32-s3)
 [![PlatformIO][badge-pio]](https://platformio.org)
 [![Latest Release][badge-release]](https://github.com/Ajimaru/OctoScale/releases/latest)
+[![Downloads][badge-downloads]](https://github.com/Ajimaru/OctoScale/releases)
+[![Made with Love][badge-love]](https://github.com/Ajimaru/OctoScale)
 
 [badge-license]: https://img.shields.io/github/license/Ajimaru/OctoScale?style=flat-square
 [badge-build]: https://img.shields.io/github/actions/workflow/status/Ajimaru/OctoScale/build.yml?style=flat-square
 [badge-platform]: https://img.shields.io/badge/ESP32--S3-N16R8-blue.svg?style=flat-square
 [badge-pio]: https://img.shields.io/badge/PlatformIO-Arduino-orange.svg?style=flat-square
 [badge-release]: https://img.shields.io/github/v/release/Ajimaru/OctoScale?style=flat-square
+[badge-downloads]: https://img.shields.io/github/downloads/Ajimaru/OctoScale/total.svg?style=flat-square
+[badge-love]: https://img.shields.io/badge/made_with-%E2%9D%A4%EF%B8%8F-ff69b4?style=flat-square
 
 > [!WARNING]
 > Database features require [OctoPrint-SpoolManagerExtended](https://github.com/Ajimaru/OctoPrint-SpoolManagerExtended).
@@ -50,7 +54,7 @@ The complete build and maintenance documentation is in the Assembly Guide:
 - [Changelog](CHANGELOG.md)
 - [License](LICENSE)
 
-The full documentation is maintained in the enabled [GitHub Wiki](https://github.com/Ajimaru/OctoScale/wiki).
+The full documentation is maintained in the [GitHub OctoScale Wiki](https://github.com/Ajimaru/OctoScale/wiki).
 
 ## License
 

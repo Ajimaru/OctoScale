@@ -105,7 +105,7 @@ inline bool spoolExists(long id, String &nameOut, String &errOut,
 }
 
 // Same as spoolExists(), but resolves by NFC tag UID (SpoolManagerExtended's `code` field)
-// instead of databaseId — for foreign/manufacturer tags (e.g. Snapmaker U1) that carry
+// instead of databaseId — for foreign/manufacturer tags (e.g. Snapmaker) that carry
 // no OctoScale databaseId payload. On a hit, idOut carries the spool's real databaseId
 // so the rest of the flow (load/tool/weigh) can proceed exactly as with a native tag.
 inline bool spoolExistsByCode(const String &uid, long &idOut, String &nameOut,

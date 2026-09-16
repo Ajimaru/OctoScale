@@ -17,3 +17,7 @@ __pycache__/
 
 # firmware build output
 artifacts/
+# KiCad local state (window layout, last-used paths)
+*.kicad_prl
+fp-info-cache
+*-backups/

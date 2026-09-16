@@ -20,6 +20,8 @@ The gesture is deliberately awkward. System info is already two deliberate steps
 
 <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/screens/test-list.svg" width="240" alt="">
 
+</br>
+
 | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/screens/test-nfc.svg" width="210" alt=""> | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/screens/test-scale.svg" width="210" alt=""> |
 | --- | --- |
 | **NFC test** — reader initialises, tag detected, UID read. Reader must show `ready`; a tag on the platform shows `present` plus its UID. | **Scale test** — load cell and HX711 respond. Press the platform: the number must move and return. |
@@ -134,7 +136,7 @@ Writes are started from the web UI but the device takes over the screen while on
 | --- | --- |
 | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/screens/nfc-write.svg" width="240" alt=""> | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/screens/nfc-erase.svg" width="240" alt=""> |
 
-Take that literally. A write is not instant — an NTAG Extended write can take around 11 seconds — and lifting the tag mid-write leaves it partially written. The status LED blinks blue for the whole operation, however long it takes.
+Take that literally. A write is not instant — an NTAG Extended write can take some seconds — and lifting the tag mid-write leaves it partially written. The status LED blinks blue for the whole operation, however long it takes.
 
 Results are shown for a few seconds:
 
@@ -150,29 +152,30 @@ Results are shown for a few seconds:
 
 ### Status LED and buzzer
 
-The status LED is two WS2812 driven as one: one on the ESP32-S3 board, one on the enclosure front. They always show the same thing — the front one is simply the one you can see.
+The status LED is two WS2812 driven as one: one on the ESP32-S3 board, one on the enclosure top. They always show the same status.
 
 The patterns below animate — the timings are the firmware's own, so what you see here is what the device does.
 
-**Resting and connection states**
+#### Resting and connection states
 
 | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/signals/led-idle.svg" width="64" alt=""> | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/signals/led-boot.svg" width="64" alt=""> | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/signals/led-ap.svg" width="64" alt=""> |
 | --- | --- | --- |
 | **Breathing green** — connected and idle, the normal resting state. Deliberately faint so an event flash stands out against it. | **Solid blue** — booting, or still joining the saved WiFi network. | **Solid orange** — no network reachable; the `OctoScale-Setup` portal is open. |
 
-**Busy — do not interrupt**
+#### Busy — do not interrupt
 
 | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/signals/led-ota.svg" width="64" alt=""> | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/signals/led-busy.svg" width="64" alt=""> | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/signals/led-db.svg" width="64" alt=""> |
 | --- | --- | --- |
 | **Blinking blue, 1 s** — software update running. Do not power off. | **Blinking blue, 0.5 s** — tag write, erase, or raw dump. Do not remove the tag. | **Solid cyan** — database lookup in flight. |
 
-**Event flashes**
+#### Event flashes
 
 | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/signals/led-ok.svg" width="64" alt=""> | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/signals/led-warn.svg" width="64" alt=""> | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/signals/led-err.svg" width="64" alt=""> |
 | --- | --- | --- |
 | **Green** — spool recognised, or write succeeded. | **Amber** — write succeeded but fields were dropped (the **ID only** case). | **Red** — write failed, no printer configured, or a missing reference weight. |
 
 Blue always means *do not interrupt*. Brightness for both WS2812 is a single slider in the web UI (System → Status LED); it scales the level only, never the colours or patterns.
+The ESP32-S3's onboard WS2812 can be disabled in the web UI (System → Status LED).
 
 The buzzer tones are matched to the LED, which blinks in lockstep with each tone segment. Frequencies and durations below are exactly what the firmware plays.
 
@@ -183,7 +186,8 @@ The buzzer tones are matched to the LED, which blinks in lockstep with each tone
 | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/signals/buz-success.svg" width="300" alt=""> | Spool loaded or weight saved — two rising beeps. |
 | <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/signals/buz-error.svg" width="300" alt=""> | Unknown spool or database offline — a low double tone. |
 
-The buzzer can be switched off entirely in the Device menu; the LED timing stays the same either way.
+The buzzer can be switched off entirely in the Device menu or web UI (System → Buzzer); Volume is adjustable there as well.
+The LED timing stays the same either way.
 
 ## Web UI user guide
 
@@ -267,7 +271,7 @@ A tag that reads intermittently by position is usually the 470 µF capacitor mis
 
 ### Nothing on the database side works
 
-Weighing, taring, calibration, and reading, writing, and erasing tags all work without OctoPrint. Lookup, printer and tool selection, and weight updates need [OctoPrint-SpoolManagerExtended](https://github.com/OctoPrint/OctoPrint-SpoolManagerExtended) reachable and configured with a valid API key. Check the DB indicator in the idle footer and the spool-ID lookup test in Setup.
+Weighing, taring, calibration, and reading, writing, and erasing tags all work without OctoPrint. Lookup, printer and tool selection, and weight updates need [OctoPrint-SpoolManagerExtended](https://github.com/Ajimaru/OctoPrint-SpoolManagerExtended) reachable and configured with a valid API key. Check the DB indicator in the idle footer and the spool-ID lookup test in Setup.
 
 ### The encoder turns the wrong way
 

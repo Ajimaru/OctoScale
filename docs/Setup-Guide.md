@@ -39,10 +39,10 @@ Release artifacts are created when a tag such as `v0.0.1` matches `FW_VERSION` i
 
 Open `http://<device-ip>/` and work through these steps in order.
 
-1. **Calibrate.** Empty the scale and tare it. Use a known reference weight with either one-point calibration or two-point calibration using light and heavy references. Verify the result. The HX711 diagnostics panel shows chip readiness, raw ADC value, and noise; unstable noise usually indicates wiring or supply trouble.
-2. **Add printers.** In Setup, add each OctoPrint instance with name, host, port, and API key from OctoPrint Settings > API.
+1. **Calibrate.** Click on the Scale tab, then empty the scale and tare it. Use a known reference weight with either one-point calibration or two-point calibration using light and heavy references. Verify the result. The HX711 diagnostics panel shows chip readiness, raw ADC value, and noise; unstable noise usually indicates wiring or supply trouble.
+2. **Add printers.** In the Setup tab, add each OctoPrint instance with name, host, port, and API key from OctoPrint Settings > API.
 3. **Choose the spool database.** Select the OctoPrint instance used for spool records. Instances sharing an external database can fail over; local SQLite instances cannot. Use the spool-ID lookup test.
-4. **Review optional settings.** Configure selection timeout, display brightness and idle stages, LED brightness, buzzer mode/tones, and web/display themes.
+4. **Review optional settings.** Configure selection timeout in the Setup Tab, display brightness and idle stages, LED brightness, buzzer mode/tones in the System tab, and web/display themes.
 5. **Test a spool.** Put a tagged spool on the scale. For a new tag, use NFC > Write ID to tag. The Debug tab can log reads and lookups.
 
 ### Software requirement

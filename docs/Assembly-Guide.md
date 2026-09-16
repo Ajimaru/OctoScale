@@ -4,6 +4,14 @@
 
 All pin numbers below are GPIO numbers and match `src/main.cpp`. The PN5180 and TFT use separate SPI buses.
 
+### Wiring diagram
+
+<a href="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/wiring/OctoScale-Wiring.pdf"><img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/wiring/OctoScale-Wiring.png" width="830" alt="OctoScale wiring schematic showing all modules, power rails and signal nets"></a>
+
+Every pin in the diagram carries the name printed on the module itself, so a symbol can be compared against the board in hand without translating part numbers. Signals are joined by net labels rather than long lines: `NFC_SCK` at the ESP32-S3 and `NFC_SCK` at the PN5180 are the same wire.
+
+The KiCad source is in [`hardware/OctoScale-Wiring/`](https://github.com/Ajimaru/OctoScale/tree/main/hardware/OctoScale-Wiring) along with the module symbol library; the schematic passes ERC with no errors or warnings.
+
 ### Power
 
 <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/USB-C_breakout_board.jpg" width="300" alt="USB-C breakout board"> <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/Mini-360_buck_converter.jpg" width="300" alt="Mini-360 buck converter">
@@ -22,11 +30,9 @@ Then fit the three electrolytic capacitors. All mount with short leads directly 
 
 The 470 uF one is what lets the PN5180 raise an RF field at all; without it the reader only detects tags sporadically. The other two keep the supply steady under load. Note the third sits at the **converter output**, not at the ESP32-S3's `3V3` pin — that pin is an output of the board's own regulator and feeds nothing here.
 
-Skipping the last two tends to show up as unexplained reboots rather than as an obvious power problem; the Development Guide explains how to tell a brownout from a firmware fault.
-
-Keep the wiring from the power supply to the board short and thick, and avoid chaining adapters, meters, or USB switches into the 5 V path. Each connector adds resistance, and enough of them will starve a current burst even though the supply itself is adequately rated.
-
-Never power the ESP32-S3 from USB while external 5 V is connected to its `5V`/`VBUS`/`VIN` pin. Disconnect the external supply for the first USB flash and any later recovery flash.
+> [!WARNING]
+> Never power the ESP32-S3 from USB while external 5 V is connected to its `5V`/`VBUS`/`VIN`
+> pin. Disconnect the external supply for the first USB flash and any later recovery flash.
 
 ### Signal wiring
 
@@ -44,8 +50,6 @@ Never power the ESP32-S3 from USB while external 5 V is connected to its `5V`/`V
 | External WS2812<br><a href="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/WS2812.jpg"><img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/WS2812.jpg" width="80" alt="WS2812 preview"></a> | `DIN`, `VCC`, `GND` | GPIO 9, 3.3 V, GND |
 
 GPIO 44 is often labelled `RX`; it is still GPIO 44. If encoder rotation is reversed, swap `A` and `B`. If weight becomes negative when loaded, swap the load-cell white and green wires. PN5180 `GPIO`, `AUX`, and `REQ` remain unconnected.
-
-Complete summary: GPIO 5/6 HX711; 7 buzzer; 9 external WS2812; 10 PN5180 NSS; 11/12/13 PN5180 MOSI/SCK/MISO; 14 PN5180 BUSY; 15/16/17 encoder A/B/PUSH; 18 start button; 21 PN5180 RST; 38/39/40/41 TFT CS/DC/RES/BLK; 42/44 TFT SCL/SDA; 47 PN5180 IRQ; 48 onboard WS2812. Do not repurpose strapping pins 0/3/45/46, USB pins 19/20, or OPI pins 26-37. GPIO 8 remains free; GPIO 43 is the USB-serial TX pin.
 
 ## Enclosure
 

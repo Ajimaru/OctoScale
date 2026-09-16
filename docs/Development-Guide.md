@@ -1,6 +1,6 @@
 # OctoScale Development Guide
 
-This guide collects public development notes for the ESP32-S3-N16R8 target. It is derived from the project's hardware plan and intentionally excludes local machine paths, credentials, personal identifiers, network identifiers, and private test history.
+This guide collects public development notes for the ESP32-S3-N16R8 target.
 
 ## Target hardware
 
@@ -99,13 +99,9 @@ Two more electrolytic capacitors buffer the rest of the build:
 
 Mount both with short leads directly at the pins they buffer; a few centimetres of wire undoes most of the benefit. Observe polarity.
 
-Sizing for the 5 V one: a WiFi transmit burst is roughly 300 mA for about 2 ms, so holding it to a 0.2 V dip would take about 3000 uF. 1500 uF does not cover that fully but damps it hard, and is the sensible stopping point — more capacitance mainly buys inrush trouble. The 3.3 V capacitor stays small because that rail carries logic loads only; the bulk buffering belongs on 5 V, where the current is actually drawn.
-
 The 3.3 V capacitor belongs at the **converter output**, not at the ESP32-S3's `3V3` pin. That pin is an output of the board's own regulator and feeds nothing in this build — HX711 and PN5180 logic hang on the Mini-360. A large capacitance on a regulator's output also does it no favours.
 
-Ceramic 100 nF capacitors in parallel with each electrolytic are good practice against high-frequency noise, but they are not what prevents brownouts — the electrolytics handle the slow, large dips. The reference build runs without them.
-
-Watch the supply path itself, not just the power supply's rating. Every connector, switch, and metre of thin cable between the supply and the board adds series resistance, and a chain of them can limit a burst badly enough to reset the device while a multimeter still reads a healthy idle voltage. If the device resets unpredictably, read `resetReason` from `/system` first: value 9 is a brownout and points at the supply path rather than at firmware. Prefer a short, thick, direct connection, and put any remote power switching on the mains side of the 5 V supply rather than in the low-voltage path.
+If the device resets unpredictably, read `resetReason` from `/system` first: value 9 is a brownout and points at the supply path rather than at firmware. Prefer a short, thick, direct connection, and put any remote power switching on the mains side of the 5 V supply rather than in the low-voltage path.
 
 ## Input handling
 
@@ -120,76 +116,6 @@ The encoder and buttons use internal pull-ups; the other side of each switch con
 The reader supports database-ID writes as well as extended spool payloads. Extended payload formats are selected by tag family and can include material, vendor, color, diameter, weights, and temperatures. NFC-V and NTAG formats may use either the project layout or OpenSpool-compatible NDEF where supported.
 
 Keep NFC work asynchronous at the HTTP boundary: start operations with the existing start endpoints, poll their status endpoints, and avoid long reader calls in request handlers. Unknown tags can be inspected through the raw dump/image paths without changing the normal spool flow.
-
-### Writing spool data: two silent traps
-
-`/nfcwritespool` takes a JSON body and ignores unknown keys without error, so a misspelled field produces a successful write that is missing data. Two cases are worth calling out because neither reports a problem.
-
-**The write format is chosen by `preferredNtagFormat` / `preferredNfcvFormat`, not by a `format` key.** There is no `format` parameter; passing one is silently ignored. For NTAG the accepted values are `openSpool` (the default), `extended`, and `tigerTag`; for NFC-V they are `extended` (the default), `openSpool`, and `openPrintTag`. Because the NTAG default is OpenSpool rather than the project layout, omitting the parameter converts an extended tag to OpenSpool, which stores a single colour and cannot represent transparent or rainbow spools. Assert `formatLabel` from a following `/nfcprobe` call when testing writes — it names the format actually on the tag.
-
-**The temperature-range fields are spelled differently on read and write.** `/nfcprobe` returns `temperatureMin`, `temperatureMax`, `bedTemperatureMin`, and `bedTemperatureMax`; `/nfcwritespool` expects `minTemperature`, `maxTemperature`, `minBedTemperature`, and `maxBedTemperature`. Every other field keeps its name in both directions, which is exactly what makes these four easy to miss. Feeding a probe response straight back into a write therefore drops these values silently; build write payloads from your own model rather than from a probe result.
-
-### Colour fields
-
-A spool colour is expressed as a small grammar rather than a single hex value: `#RRGGBB`, up to three colours separated by `;`, an optional leading `transparent:` prefix, the bare word `transparent` for an untinted spool, or the bare word `rainbow`.
-
-Composition is the exact inverse of parsing, so a `colorFull` read back and written again is unchanged:
-
-| `isRainbow` | `isTransparent` | `colorCount` | `colorFull` |
-| --- | --- | --- | --- |
-| true | any | any | `rainbow` |
-| false | true | 0 | `transparent` |
-| false | true | 2 | `transparent:#000000;#FFFFFF` |
-| false | false | 1 | `#000000` |
-| false | false | 0 | no colour — see below |
-
-`transparent` with `colorCount == 0` is a legitimate state, not a missing value: an untinted transparent spool has no primary colour to report. A composer must not emit `#000000` there — the zeroed primary slot is unset, not black.
-
-The last row is the one case where the grammar says nothing about representation, only about state. This firmware always emits the key with an empty string; a consumer that distinguishes "absent" from "present but empty" — the OctoPrint plugin omits the key entirely — is equally correct. **Treat an empty `colorFull` and an absent one as the same thing.** Neither is a colour, and reading one as the negation of the other invents a distinction the grammar does not make.
-
-A consumer falling back to another field must test for **absence**, not for falsyness:
-
-```js
-const c = colorFull != null ? colorFull : color;   // correct
-const c = colorFull ? colorFull : color;           // wrong: "" falls through
-```
-
-Both spellings behaved identically while black was still dropped on read, because a black spool left every colour field empty. Since black reads back as `#000000`, they diverge: the falsy test sends a legitimately colourless spool to a fallback field that is also empty, and on formats where `color` is populated it can resurrect a stale value the grammar had deliberately cleared. This is a live trap for anything written against the older behaviour.
-
-> **Release note owed.** The black-colour fix is not in any tagged release yet — it landed after `v0.0.2`. The first release that carries it needs to say more than "black is now read correctly", because the fix changes what an existing consumer sees: **anything that treated an empty colour field as "no colour" now receives `#000000` for black spools, and a falsy fallback on `colorFull` starts behaving differently than before.** A consumer written against the old behaviour breaks silently, without an error or a visible symptom, which is exactly the kind of change that has to be announced rather than discovered.
->
-> Until that release is tagged, `fwVersion` cannot tell the two behaviours apart: `FW_VERSION` has read `0.0.2` since the tag, and every commit after it reports the same string. A device built before the fix and one built after both answer `0.0.2`, differing only in the build timestamp, which is not something a consumer should branch on. **A consumer cannot currently detect at runtime whether an empty colour field means "no colour" or "black, dropped".** That is the practical argument for bumping the version when the fix ships, rather than letting `0.0.2` keep accumulating behaviour.
->
-> A bump does not fully close the gap, though, and a release note should not imply that it does: it only marks devices built after it. Every unit already in the field keeps reporting `0.0.2` regardless of which behaviour it has, so "from v0.0.3 the colour field behaves like X" is a statement about new devices, never about all of them.
->
-> **Do not branch on `fwVersion` to decide how to read a colour.** The signal that actually answers the question is on the tag: the per-carrier format version and its colour-flag byte say what a given tag encodes, independently of which firmware read it. `fwVersion` describes the reader; the gate table above describes the data.
-
-**`colorFull` is the field to rely on.** It carries the complete colour information for every tag format and can be written back verbatim. `extended.color` is deliberately narrower — the primary colour as plain `#RRGGBB`, and empty for `rainbow` or bare `transparent`, which have no primary colour. `colorCount`, `colors[]`, `isTransparent`, and `isRainbow` expose the parsed parts so consumers need not re-parse the grammar.
-
-Black is a real colour, not a missing one: a black spool reads back as `#000000`. Three zero bytes mean black, never "unset" — the older reading, which treated `0,0,0` as absence, silently dropped every black spool.
-
-The one exception is an extended tag written before its carrier gained the colour-flag byte. On those tags "black" and "no colour set" are genuinely the same bytes and cannot be told apart, so the field stays empty rather than guessing a colour that could overwrite a real one on import.
-
-**The version counters run per carrier and do not line up.** Each carrier gained the flag byte at its own version number, so there is no single "from v4" rule — reading one carrier's threshold as if it applied to the others is the mistake this table exists to prevent:
-
-| Carrier | Colour flags from | Current version | Read-path gate |
-| --- | --- | --- | --- |
-| Mifare Classic Extended | **v4** | v5 | `block8[2] >= 0x04` |
-| NFC-V Extended | **v3** | v4 | `isV3nfcv` |
-| NTAG Extended | **v2** | v3 | `fixedBuf[2] >= 0x02` |
-
-The gate governs only this ambiguity, not the colour field as a whole. Four cases, which is the whole behaviour:
-
-| Tag | Bytes | Result |
-| --- | --- | --- |
-| Below gate | non-zero | the colour — a pre-gate tag still reports its primary colour |
-| Below gate | `0,0,0` | empty — black and unset are indistinguishable here |
-| At/above gate, `colorCount >= 1` | `0,0,0` | `#000000` — the flag byte confirms a colour is set, so this is black |
-| At/above gate, `colorCount == 0` | any | empty — the flag byte positively states "no colour" |
-
-The last row looks like a bug and is not: above the gate, `colorCount == 0` is an assertion that no colour is set, not a gap in the data. It is also the state a bare `transparent` spool is in, which is why the primary bytes must not be written into slot 0 there.
-
-Formats that encode absence explicitly have no such ambiguity and are never gated: OpenSpool and OpenPrintTag omit the field entirely when no colour is set (a missing JSON key / CBOR key 19), so zero bytes there are unambiguously black. TigerTag has no "not set" sentinel at all — `0,0,0` is black, and byte 19 is alpha, not a presence marker.
 
 ### Vendored PN5180 patches
 
@@ -299,8 +225,6 @@ When changing public behavior, update the relevant guide under `docs/` and keep 
 `docs/` is the single source of truth. Every file there is a wiki page and the filename is the page name. The `wiki-sync` workflow copies `docs/*.md` to the GitHub wiki on every push to `main` that touches them, and can also be run manually from the Actions tab. **Edits made directly in the wiki are overwritten by the next sync** — change the file under `docs/` instead, or the change is lost the next time anyone edits documentation.
 
 The wiki's `Home` page is not synced and has no counterpart in `docs/`. It is a short landing page with its own navigation and images, maintained in the wiki itself.
-
-The workflow needs a repository secret named `WIKI_TOKEN` containing a personal access token with `repo` scope. GitHub's built-in `GITHUB_TOKEN` cannot write to a wiki, which is the only reason a separate token is required. Without the secret the workflow fails on its first step with an explicit message rather than silently doing nothing.
 
 Anything that a consumer of the HTTP API can rely on belongs in this guide rather than only in a code comment. A promise that lives in the implementation holds only until someone rewrites the implementation; a documented one makes a later change the maintainer's problem instead of a downstream surprise. Any field the firmware accepts is part of the contract whether or not it is written down — the only choice is whether that contract is legible.
 
