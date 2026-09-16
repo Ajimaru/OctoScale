@@ -233,6 +233,8 @@ Display brightness and the three idle timeouts, LED brightness, buzzer mode, and
 
 Configuration backup exports as AES-256-CBC encrypted JSON. API keys are never written in plaintext, so a backup file is safe to keep off the device — but it is also unreadable without the passphrase, so store that somewhere durable.
 
+**Restart device** reboots the hardware. Nothing is cleared: calibration, printers, API keys and every setting live in NVS and survive it. It is refused while a firmware update is running, since a restart there would leave an incomplete image in the flash partition. The device is unreachable for roughly twenty seconds; the page reconnects on its own once it answers again, so no reload is needed. A weighing or tag write that happens to be in flight is lost — the spool weight in the database is not, because it is written before the tag is.
+
 ### Debug
 
 A live log of NFC reads and HTTP calls. This polls at a high rate and only runs while the Debug tab is open and the browser tab visible, so leaving it open in a background window costs nothing.

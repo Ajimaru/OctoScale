@@ -2872,6 +2872,27 @@ void startWebServer() {
     ESP.restart();
   });
 
+  // Plain restart, no config change: POST /reboot
+  // POST (not GET) on purpose -- a GET reachable from a link preview, a browser
+  // prefetch or a crawler would reboot the device without anyone asking.
+  // Refused while an OTA is running: the flash write is mid-partition there, and a
+  // restart would leave an incomplete image behind. Everything else is safe to cut
+  // off -- a queued NFC write loses at worst the tag update (the database already
+  // holds the value), and the scale keeps its calibration in NVS.
+  server.on("/reboot", HTTP_POST, []() {
+    if (g_otaInProgress) {
+      server.send(409, "text/plain", "Firmware update in progress - not rebooting");
+      return;
+    }
+    server.send(200, "text/plain", "Rebooting");
+    Serial.println("Reboot requested via web UI");
+    // Let the response actually leave the socket before the stack goes away; the
+    // client otherwise sees a connection reset and cannot tell "rebooting" from
+    // "request never arrived".
+    delay(300);
+    ESP.restart();
+  });
+
   // Web OTA from a URL: POST /updateurl?url=<http-URL-to-.bin>
   // The ESP downloads the firmware itself from the URL and flashes it (HTTPUpdate).
   // Blocks during the download (a few seconds on the LAN). Reboots on success.

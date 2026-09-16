@@ -1399,7 +1399,28 @@ static const char INDEX_HTML[] PROGMEM =
     "+'</div>'"
     "+'<label class=\"switch\" style=\"margin-top:12px\"><input type=\"checkbox\"'+(fwOnlineEnabled?' checked':'')"
     "+' onchange=\"fwToggle(this.checked)\"> Enable online firmware update check.</label>';"
+    // Restart button. Part of the polled innerHTML rather than static markup because
+    // the whole card is rebuilt every poll -- a static button placed outside would
+    // survive, but keeping it here means the reboot message below is wiped by the
+    // next poll only after the device is actually gone.
+    "h+='<button onclick=\"reboot(event)\" class=\"danger\" style=\"margin-top:12px\">"
+    "\\u21BB Restart device</button>'"
+    "+'<div id=\"rbmsg\" class=\"note\" style=\"text-align:center;min-height:1.1em\"></div>';"
     "document.getElementById('sysbox').innerHTML=h;});}"
+    // Reboot: the device dies mid-response, so there is no success callback to wait
+    // for. The poll loop keeps running and the page comes back by itself once /system
+    // answers again -- no reload needed, and no fake countdown that would be wrong
+    // whenever the boot takes longer than guessed.
+    "function reboot(e){if(!confirm('Restart the device? It is unreachable for about "
+    "20 seconds. A weighing or tag write in progress is lost.'))return;"
+    "busy(e,fetch('/reboot',{method:'POST'}).then(r=>r.text().then(function(t){"
+    "var m=document.getElementById('rbmsg');if(!m)return;"
+    "if(!r.ok){m.style.color='var(--bad)';m.textContent='\\u2717 '+t;return;}"
+    "m.style.color='var(--muted)';m.textContent='Restarting \\u2013 the page reconnects by itself\\u2026';"
+    // The request can also fail because the device rebooted before the response was
+    // read. That is the expected path, not an error worth showing in red.
+    "})).catch(function(){var m=document.getElementById('rbmsg');"
+    "if(m){m.style.color='var(--muted)';m.textContent='Restarting \\u2013 the page reconnects by itself\\u2026';}}));}"
     // ---- WiFi status ----
     "function wifibars(q){var n=q>=75?4:q>=50?3:q>=25?2:q>0?1:0;"
     "var col=q>=50?'var(--ok)':q>=25?'var(--warn)':'var(--bad)';var s='';"
