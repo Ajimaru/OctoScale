@@ -233,6 +233,8 @@ Display brightness and the three idle timeouts, LED brightness, buzzer mode, and
 
 Configuration backup exports as AES-256-CBC encrypted JSON. API keys are never written in plaintext, so a backup file is safe to keep off the device — but it is also unreadable without the passphrase, so store that somewhere durable.
 
+The file covers the whole configuration: the calibration factor, every OctoPrint instance with its database selection and selection timeout, and all device settings — display brightness and the three idle timeouts, the screensaver, both themes, buzzer mode, volume and pitch, LED brightness and routing, the debug console, and the online firmware check. Restoring applies them immediately; no reboot is needed. A setting you have never changed is left out of the file rather than exported at its current default, so restoring an old backup onto newer firmware keeps that firmware's defaults instead of freezing yesterday's. For the same reason, a backup written before a setting existed simply leaves it alone. WiFi credentials are the one exception — WiFiManager stores them separately and they are not part of the file, so a restored device still needs its network set up.
+
 **Restart device** reboots the hardware. Nothing is cleared: calibration, printers, API keys and every setting live in NVS and survive it. It is refused while a firmware update is running, since a restart there would leave an incomplete image in the flash partition. The device is unreachable for roughly twenty seconds; the page reconnects on its own once it answers again, so no reload is needed. A weighing or tag write that happens to be in flight is lost — the spool weight in the database is not, because it is written before the tag is.
 
 ### Debug

@@ -2686,6 +2686,35 @@ void startWebServer() {
       server.send(400, "text/plain", err.length() ? err : "Import failed");
       return;
     }
+    // bkImport only wrote NVS; the running firmware keeps these in RAM, so without
+    // this the restored display/buzzer/LED values would appear to have been ignored
+    // until the next boot. Same reads as the boot block in setup(), same order.
+    {
+      Preferences p;
+      p.begin("octoscale", true);
+      g_blActive = p.getUChar("blActive", g_blActive);
+      g_blDim = p.getUChar("blDim", g_blDim);
+      g_blTimeoutSec = p.getUShort("blTimeout", g_blTimeoutSec);
+      g_ssEnabled = p.getBool("ssEnabled", g_ssEnabled);
+      g_ssTimeoutSec = p.getUShort("ssTimeout", g_ssTimeoutSec);
+      g_offEnabled = p.getBool("offEnabled", g_offEnabled);
+      g_offTimeoutSec = p.getUShort("offTimeout", g_offTimeoutSec);
+      g_menuDark = p.getBool("menuDark", g_menuDark);
+      g_buzEnabled = p.getBool("buzEn", g_buzEnabled);
+      g_buzMode = p.getUChar("buzMode", g_buzMode);
+      g_buzVol = p.getUChar("buzVol", g_buzVol);
+      g_buzFreq = p.getUShort("buzFreq", g_buzFreq);
+      g_ledBrightness = p.getUChar("ledBright", g_ledBrightness);
+      g_ledOnboard = p.getBool("ledOnboard", g_ledOnboard);
+      g_ledPin2 = p.getBool("ledPin2", g_ledPin2);
+      g_dbgLogEnabled = p.getBool("dbgLogEn", g_dbgLogEnabled);
+      g_fwOnlineEnabled = p.getBool("fwOnline", g_fwOnlineEnabled);
+      p.end();
+    }
+    menuApplyTheme();   // palette globals still hold the pre-restore theme
+    ledPin2Apply();     // plain GPIO write, safe from either core
+    g_ledLastShown = 0xFFFFFFFF;  // force ledTick() (core 0) to repaint with the new scaling
+    displayTouch();     // new idle timeouts start counting from now, not from the old activity
     server.send(200, "application/json", octoListJson());
   });
 

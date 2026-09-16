@@ -23,13 +23,26 @@ extern uint8_t g_flowAskTimeoutSec;
 // the backup can't be restored.
 //
 // The rest of the config (names, hosts, ports, dbId, calFactor, dbInstance,
-// askTimeout) isn't secret and stays plaintext, so the backup remains readable —
-// only the keys are protected.
+// askTimeout, and the device settings below) isn't secret and stays plaintext, so the
+// backup remains readable — only the keys are protected.
 //
 // Backup format (JSON):
 //   { "v":1, "enc":"aes256cbc-pbkdf2", "salt":"<b64>", "iter":10000,
 //     "calFactor":..., "dbInstance":..., "askTimeout":...,
+//     "settings": { "blActive":..., "ssTimeout":..., ... },
 //     "octo":[ {name,host,port,dbId, "apikey_enc":"<b64: iv||ciphertext>"} ] }
+//
+// "settings" carries every remaining NVS key in the "octoscale" namespace: display
+// brightness/idle stages, buzzer, LED, TFT theme, debug log, firmware check. It is
+// addressed by NVS key name rather than by the matching global, because g_menuDark is
+// file-static in menu.h, which this header is included long before — going through NVS
+// keeps one code path for all of them instead of two.
+//
+// Version stays 1. A "v":1 reader that predates this field ignores the unknown
+// "settings" object (ArduinoJson returns null for a missing key), and this reader
+// treats a backup without it as "nothing to restore" rather than writing defaults —
+// see bkRestoreSettings(). Bumping the version would have made old backups
+// unrestorable for no gain.
 
 #define BK_SALT_LEN   16
 #define BK_ITER       10000
@@ -136,6 +149,95 @@ inline bool bkDecField(const uint8_t key[BK_KEY_LEN], const String &b64, String 
   return true;
 }
 
+// --- Device settings table ------------------------------------------------------
+// Every NVS key in the "octoscale" namespace that is NOT already covered by a
+// dedicated field above (calFactor, dbInstance, askTimeout) or by octoSave()
+// (octoInstances). Keeping it as one table means adding a setting is a single line
+// here, and export and import cannot drift apart.
+//
+// The type tag matters: Preferences stores the width it was written with, and reading
+// a uint8 back as uint16 returns 0 rather than the value. So each entry records how
+// main.cpp writes it.
+enum BkType : uint8_t { BK_U8, BK_U16, BK_BOOL };
+
+struct BkSetting {
+  const char *key;
+  BkType      type;
+};
+
+static const BkSetting BK_SETTINGS[] = {
+  // Display: active/dim backlight and the three idle stages.
+  { "blActive",   BK_U8   },
+  { "blDim",      BK_U8   },
+  { "blTimeout",  BK_U16  },
+  { "ssEnabled",  BK_BOOL },
+  { "ssTimeout",  BK_U16  },
+  { "offEnabled", BK_BOOL },
+  { "offTimeout", BK_U16  },
+  { "menuDark",   BK_BOOL },
+  // Buzzer.
+  { "buzEn",      BK_BOOL },
+  { "buzMode",    BK_U8   },
+  { "buzVol",     BK_U8   },
+  { "buzFreq",    BK_U16  },
+  // LED.
+  { "ledBright",  BK_U8   },
+  { "ledOnboard", BK_BOOL },
+  { "ledPin2",    BK_BOOL },
+  // System.
+  { "dbgLogEn",   BK_BOOL },
+  { "fwOnline",   BK_BOOL },
+};
+static const size_t BK_SETTINGS_COUNT = sizeof(BK_SETTINGS) / sizeof(BK_SETTINGS[0]);
+
+// Reads the settings straight out of NVS into the JSON object. A key that was never
+// written is skipped entirely instead of being exported as its default — otherwise a
+// restore would freeze today's defaults into the backup, and a later firmware could
+// not change them for a device that had never touched the setting.
+inline void bkExportSettings(JsonObject dst) {
+  Preferences p;
+  p.begin("octoscale", true);
+  for (size_t i = 0; i < BK_SETTINGS_COUNT; i++) {
+    const BkSetting &s = BK_SETTINGS[i];
+    if (!p.isKey(s.key)) continue;
+    switch (s.type) {
+      case BK_U8:   dst[s.key] = p.getUChar(s.key);  break;
+      case BK_U16:  dst[s.key] = p.getUShort(s.key); break;
+      case BK_BOOL: dst[s.key] = p.getBool(s.key);   break;
+    }
+  }
+  p.end();
+}
+
+// Writes the settings back into NVS. Keys missing from the backup are left untouched,
+// so restoring an older backup keeps whatever the device already has rather than
+// resetting it. Returns the number of keys written.
+//
+// The caller has to re-read NVS into the globals afterwards (and re-apply theme/LED),
+// because the running firmware holds these values in RAM — see the /restore handler.
+inline size_t bkRestoreSettings(JsonVariantConst src) {
+  if (!src.is<JsonObjectConst>()) return 0;
+  JsonObjectConst obj = src.as<JsonObjectConst>();
+  Preferences p;
+  p.begin("octoscale", false);
+  size_t n = 0;
+  for (size_t i = 0; i < BK_SETTINGS_COUNT; i++) {
+    const BkSetting &s = BK_SETTINGS[i];
+    JsonVariantConst v = obj[s.key];
+    if (v.isNull()) continue;
+    switch (s.type) {
+      // Clamped to the field width on purpose: the JSON is a file the user can edit,
+      // and an out-of-range number would otherwise wrap silently.
+      case BK_U8:   p.putUChar(s.key, (uint8_t)constrain(v.as<int>(), 0, 255));      break;
+      case BK_U16:  p.putUShort(s.key, (uint16_t)constrain(v.as<long>(), 0L, 65535L)); break;
+      case BK_BOOL: p.putBool(s.key, v.as<bool>());                                  break;
+    }
+    n++;
+  }
+  p.end();
+  return n;
+}
+
 // --- Export --------------------------------------------------------------------
 // Builds the backup JSON. pw != "" => API keys encrypted; pw == "" => keys are
 // OMITTED, so a plaintext key is never exported.
@@ -161,6 +263,7 @@ inline String bkExport(const String &pw) {
   doc["calFactor"] = g_calFactor;
   doc["dbInstance"] = g_dbInstance;
   doc["askTimeout"] = g_flowAskTimeoutSec;
+  bkExportSettings(doc["settings"].to<JsonObject>());
 
   JsonArray arr = doc["octo"].to<JsonArray>();
   for (uint8_t i = 0; i < g_octoCount; i++) {
@@ -251,5 +354,9 @@ inline bool bkImport(const String &json, const String &pw, String &errOut) {
     }
     p.end();
   }
+
+  // Display/buzzer/LED/system settings. Absent in backups written before this field
+  // existed, in which case nothing is touched.
+  bkRestoreSettings(doc["settings"]);
   return true;
 }
