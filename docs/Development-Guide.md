@@ -185,6 +185,10 @@ Preferences are stored under the `octoscale` namespace. Important keys include t
 
 Configuration backup is JSON. API keys are encrypted only when a passphrase is supplied, using PBKDF2-HMAC-SHA256 and AES-256-CBC with a random salt and IV. Without a passphrase, keys are omitted rather than exported in plaintext. Restore validates and decrypts the complete file before writing anything to NVS, so a bad password must leave the running configuration unchanged. The backup protects the file, not an unencrypted LAN transport.
 
+Device settings travel in a `settings` object addressed by NVS key, driven by the `BK_SETTINGS` table in `backup.h`. Adding a setting means adding one row there; export and import both walk the same table, so they cannot drift apart. Each row records the width the value is written with, because Preferences returns 0 when a `uint8` key is read back as `uint16`. Export skips keys that were never written, and import skips keys the file does not contain — an old backup therefore leaves newer settings at the running firmware's defaults instead of resetting them, which is also why the format version stays at 1. The table goes through NVS rather than the matching globals because `g_menuDark` is file-static in `menu.h`, included long after `backup.h`.
+
+`bkImport` only writes NVS. The `/restore` handler re-reads those keys into the globals afterwards and re-applies the theme and LED routing, since the running firmware holds them in RAM; without that, a restore appears to have been ignored until the next boot.
+
 ## WiFi and OctoPrint integration
 
 WiFiManager provides normal station setup, AP fallback, captive portal, credential storage, reconnect attempts, and WiFi scanning. Keep connection retries and timeouts long enough for slow routers before starting the fallback AP.

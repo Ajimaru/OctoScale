@@ -36,6 +36,6 @@ Foreign tags such as Snapmaker tags fall back to a UID lookup in SpoolManagerExt
 - WiFiManager provisioning with AP fallback and captive portal.
 - OTA through `espota` or web upload/URL update.
 - Multiple OctoPrint instances with database failover when instances share an external database.
-- AES-256-CBC encrypted JSON configuration backup; API keys are never exported in plaintext.
+- AES-256-CBC encrypted JSON backup of the full configuration, including all display, buzzer, and LED settings; API keys are never exported in plaintext.
 
 Continue with the [Hardware & Printing Guide](Hardware-and-Printing-Guide) to gather components and print the enclosure parts.
