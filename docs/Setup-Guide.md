@@ -47,7 +47,7 @@ Open `http://<device-ip>/` and work through these steps in order.
 
 ### Software requirement
 
-Database features require [OctoPrint-SpoolManagerExtended](https://github.com/OctoPrint/OctoPrint-SpoolManagerExtended). OctoScale uses its API endpoints for spool lookup by ID or UID, measured-weight updates, printer/tool loading, and database identification for failover. All calls use API keys; OctoScale never connects to MySQL directly.
+Database features require [OctoPrint-SpoolManagerExtended](https://github.com/Ajimaru/OctoPrint-SpoolManagerExtended). OctoScale uses its API endpoints for spool lookup by ID or UID, measured-weight updates, printer/tool loading, and database identification for failover. All calls use API keys; OctoScale never connects to MySQL directly.
 
 Without the plugin, weighing, taring, calibration, reading, writing, and erasing NFC tags still work. Automatic lookup, printer/tool selection, and database weight updates do not.
 

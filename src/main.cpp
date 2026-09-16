@@ -631,6 +631,14 @@ static String nfcWriteUnsupportedFields(const SpoolTagData &d, const String &for
   return out;
 }
 
+// Every write format this firmware knows carries remainingWeight EXCEPT OpenPrintTag
+// (nfcvOpenPrintTag): its spec (openprinttag.h) has no matching field, so the value
+// would silently vanish on write rather than showing up as a dropped/unsupported field
+// like the others do above.
+static bool nfcFormatHasRemainingWeight(const String &format) {
+  return format.length() > 0 && format != "nfcvOpenPrintTag";
+}
+
 static String nfcWriteDropWarning(const String &dropped, const String &format) {
   if (!dropped.length()) return "";
   if (format == "octoscaleExtended" || format == "nfcvExtended" || format == "ntagExtended") {
@@ -1177,12 +1185,64 @@ static void flowDoWeighSave() {
   dbgLogf("HTTP: PUT measuredWeight databaseId=%ld gross=%.1f (instance %u)",
           g_flowSpoolId, g_flowGrossWeight, idx);
   String err;
-  bool ok = octoSetMeasuredWeight(idx, g_flowSpoolId, g_flowGrossWeight, err);
+  // The plugin recomputes usedWeight/usedLength from the gross weight and hands them
+  // back in the same response -- see octoSetMeasuredWeight. They go onto the tag below
+  // so it doesn't keep a stale used* next to a fresh remaining*.
+  float newUsedWeight = -1.0f;
+  long newUsedLength = -1L;
+  bool ok = octoSetMeasuredWeight(idx, g_flowSpoolId, g_flowGrossWeight, err,
+                                  &newUsedWeight, &newUsedLength);
   dbgLogf("HTTP: measuredWeight -> ok=%d err=%s", ok, err.c_str());
   if (ok) {
     g_flowState = FLOW_DONE;
     g_flowMsg = "Weight saved";
     buzzerSuccess();  // success tone + synced green LED pulse: weight saved
+
+    // Mirror the new remaining weight onto the tag -- the reader sits right at the
+    // scale, so the spool that was just weighed is still on it. DB save already
+    // succeeded above; a tag-sync problem here is reported as a warning only (per
+    // product decision), it never rolls the DB write back.
+    String tagWarn;
+    if (!(g_pn5180Present && g_nfcExtCacheUid == g_pn5180Uid)) {
+      tagWarn = "tag not on reader, not updated";
+    } else if (!g_nfcExtCacheHasExtended || g_nfcExtCacheData.databaseId != g_flowSpoolId) {
+      tagWarn = "tag doesn't match this spool, not updated";
+    } else if (!nfcFormatHasRemainingWeight(g_nfcExtCacheWriteFormat)) {
+      tagWarn = g_nfcExtCacheWriteFormat + " tag format has no remainingWeight field, not updated";
+    } else if (g_nfcWritePending) {
+      tagWarn = "reader busy with another write, tag not updated";
+    } else {
+      float remaining = (g_flowSpoolWeight >= 0.0f) ? (g_flowGrossWeight - g_flowSpoolWeight) : -1.0f;
+      if (remaining < 0.0f) {
+        tagWarn = "no reference weight, tag not updated";
+      } else {
+        g_nfcWriteSpoolData = g_nfcExtCacheData;
+        g_nfcWriteSpoolData.remainingWeight = remaining;
+        // Only overwrite what the plugin actually recomputed. It leaves usedLength alone
+        // when the spool has no density/diameter, and writing a locally derived value
+        // instead would put a number on the tag that the database never held.
+        if (newUsedWeight >= 0.0f) g_nfcWriteSpoolData.usedWeight = newUsedWeight;
+        if (newUsedLength >= 0L)   g_nfcWriteSpoolData.usedLength = newUsedLength;
+        // Rewrite in the SAME layout the tag already carries -- nfcvFormat/ntagFormat
+        // pick the layout unconditionally (pn5180WriteSpoolTag has no "detect existing
+        // format" mode), so passing the wrong one here would silently reformat the tag
+        // into a different layout instead of updating the one on it.
+        g_nfcWriteNfcvFormat = (g_nfcExtCacheWriteFormat == "nfcvOpenSpool") ? "openSpool" : "extended";
+        g_nfcWriteNtagFormat = (g_nfcExtCacheWriteFormat == "tigerTag") ? "tigerTag"
+                              : (g_nfcExtCacheWriteFormat == "ntagExtended") ? "extended" : "openSpool";
+        g_nfcWriteKind = NFCWRITE_SPOOL;
+        g_nfcWriteDone = false;
+        g_nfcWriteDoneAt = millis();
+        g_nfcWritePending = true;
+        g_nfcWriteReq = true;  // pn5180Task takes over; result surfaces via the normal write-result screen/poll
+        dbgLogf("flowDoWeighSave: tag update queued, databaseId=%ld remaining=%.1f format=%s",
+                g_flowSpoolId, remaining, g_nfcExtCacheWriteFormat.c_str());
+      }
+    }
+    if (tagWarn.length()) {
+      dbgLog("flowDoWeighSave: tag not updated - " + tagWarn);
+      g_flowMsg = "Weight saved (" + tagWarn + ")";
+    }
   } else {
     g_flowState = FLOW_ERROR;
     g_flowMsg = err;

@@ -429,9 +429,18 @@ inline int octoSpoolInfoByCode(uint8_t idx, const String &uid, long &databaseIdO
 // Returns true = saved. On 400 the reasons are in the body as validationErrors and are
 // surfaced, otherwise the device would only see "HTTP 400". 409 = the spool was
 // changed elsewhere in the meantime (nothing written).
+// usedWeightOut/usedLengthOut are optional: the plugin recomputes both from the gross
+// weight (usedWeight = totalWeight - remainingWeight, usedLength from density+diameter)
+// and returns the whole updated spool in the 200 body. They are read from there rather
+// than derived here on purpose -- a second implementation of the same formula is how the
+// two sides drift apart unnoticed. -1 = the response didn't carry the field (the plugin
+// leaves usedLength alone when density or diameter is missing).
 inline bool octoSetMeasuredWeight(uint8_t idx, long databaseId, float grossWeight,
-                                  String &errOut) {
+                                  String &errOut, float *usedWeightOut = nullptr,
+                                  long *usedLengthOut = nullptr) {
   errOut = "";
+  if (usedWeightOut) *usedWeightOut = -1.0f;
+  if (usedLengthOut) *usedLengthOut = -1L;
   if (idx >= g_octoCount) {
     errOut = "Invalid instance";
     return false;
@@ -460,7 +469,42 @@ inline bool octoSetMeasuredWeight(uint8_t idx, long databaseId, float grossWeigh
   http.end();
   dbgLogf("HTTP PUT %s -> %d", url.c_str(), code);
 
-  if (code == HTTP_CODE_OK) return true;
+  if (code == HTTP_CODE_OK) {
+    if (usedWeightOut || usedLengthOut) {
+      JsonDocument doc;
+      if (deserializeJson(doc, resp)) {
+        // Saved regardless -- the caller just doesn't get the recomputed fields.
+        dbgLog("measuredWeight: response JSON error, recomputed fields unavailable");
+        return true;
+      }
+      JsonVariant spool = doc["spool"];
+      // usedWeight goes through the plugin's formatFloat() and arrives as a string
+      // ("648.1"), same as spoolWeight/totalWeight elsewhere in this file. usedLength is
+      // raw int mm. Accept either shape for both: a formatting change on the plugin side
+      // would otherwise silently turn into -1 here.
+      if (usedWeightOut) {
+        JsonVariant uw = spool["usedWeight"];
+        if (uw.is<const char *>()) {
+          const char *s = uw | "";
+          if (s && s[0]) *usedWeightOut = atof(s);
+        } else if (uw.is<float>()) {
+          *usedWeightOut = uw.as<float>();
+        }
+      }
+      if (usedLengthOut) {
+        JsonVariant ul = spool["usedLength"];
+        if (ul.is<const char *>()) {
+          const char *s = ul | "";
+          if (s && s[0]) *usedLengthOut = atol(s);
+        } else if (ul.is<long>()) {
+          *usedLengthOut = ul.as<long>();
+        }
+      }
+      dbgLogf("measuredWeight: recomputed usedWeight=%.1f usedLength=%ld",
+              usedWeightOut ? *usedWeightOut : -1.0f, usedLengthOut ? *usedLengthOut : -1L);
+    }
+    return true;
+  }
 
   if (code == 400 || code == 409) {
     JsonDocument doc;
