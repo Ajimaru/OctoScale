@@ -346,7 +346,7 @@ inline int octoSpoolInfo(uint8_t idx, long databaseId, String &nameOut,
 }
 
 // Resolves a spool by its NFC tag UID instead of databaseId — for foreign/manufacturer
-// tags (e.g. Snapmaker U1) that carry no OctoScale databaseId payload, only a raw UID.
+// tags (e.g. Snapmaker) that carry no OctoScale databaseId payload, only a raw UID.
 // Endpoint: GET /plugin/SpoolManagerExtended/spool/byCode/<uid> (mirrors octoSpoolInfo's
 // /spool/<id>; matches SpoolManagerExtended's `code` field, same string SpoolManagerExtended's own
 // U1RfidManager.normalizeCardUid() produces — uppercase hex, no separators).

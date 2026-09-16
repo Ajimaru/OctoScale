@@ -21,7 +21,7 @@ The PN5180 reads and writes NFC-A/NTAG/Ultralight, NFC-V/ISO 15693, and Mifare C
 | `nfcvOpenPrintTag` | NFC-V | OpenPrintTag CBOR, including drying data |
 | `tigerTag` | NTAG | TigerTag Standard, unsigned, big-endian 80-byte payload |
 
-Foreign tags such as Snapmaker U1 tags fall back to a UID lookup in SpoolManagerExtended. NFC writes report `droppedFields` when fields do not fit and `unsupportedFields` when the selected format has no representation. Unknown tags can be inspected with a raw sector/block dump.
+Foreign tags such as Snapmaker tags fall back to a UID lookup in SpoolManagerExtended. NFC writes report `droppedFields` when fields do not fit and `unsupportedFields` when the selected format has no representation. Unknown tags can be inspected with a raw sector/block dump.
 
 ## Interface and connectivity
 

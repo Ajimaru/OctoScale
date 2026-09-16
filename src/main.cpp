@@ -671,7 +671,7 @@ volatile bool g_flowDbRequest = false;  // DB-check trigger from pn5180Task
 // blank/unassigned one -- lets the TFT report it neutrally instead of as an error.
 volatile bool g_flowForeignTag = false;
 volatile bool g_flowEmptyTag = false;    // ... or a verified-blank one (occupancy=="empty")
-// Foreign tag (e.g. Snapmaker U1): no databaseId payload on the tag, only a UID ->
+// Foreign tag (e.g. Snapmaker): no databaseId payload on the tag, only a UID ->
 // runDbCheck() resolves it via spoolExistsByCode() instead of spoolExists(id).
 bool g_flowLookupByCode = false;
 String g_flowLookupUid = "";
