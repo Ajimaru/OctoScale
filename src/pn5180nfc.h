@@ -62,6 +62,14 @@ struct PN5180ProbeResult {
   // comment); "other" = neither (foreign/non-NDEF content, erase/write would refuse
   // to touch it); "" = not read (Mifare, or read failed).
   String ccState = "";
+  // False while a tag has been detected but its Extended read / occupancy probes have
+  // not finished yet. The poll loop publishes type and uid as soon as the tag answers,
+  // because the TFT needs them immediately, but the id and the format fields are only
+  // filled a few hundred milliseconds later. Without this flag that window is
+  // indistinguishable from a finished read of a tag that genuinely has no id, so a
+  // caller polling once could see an Extended tag as "empty, no id" and offer to
+  // overwrite it. A caller that only acts on complete data should require this.
+  bool complete = false;
 };
 
 // databaseId storage on the tag (uniformly ASCII decimal):

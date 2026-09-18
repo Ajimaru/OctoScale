@@ -406,7 +406,20 @@ static void nfcClassifyTag(PN5180TagType type, uint16_t atqa, uint8_t sak,
     if (isClassic) {
       writeFormatOut = "octoscaleExtended";
       formatLabelOut = "Extended";
-      capacityBytesOut = 16 * 5;  // blocks 4,8,9,12,13,14 minus block 4's own 12 already counted elsewhere -> approx sector capacity
+      // Derived from the octoscaleExtended block layout rather than hard-coded, so it
+      // cannot drift away from the write path again. It reported 16*5 = 80 B, a v1-era
+      // figure that predates the v2/v3 numeric and string blocks -- roughly a quarter
+      // of what is actually written, which made the value useless for deciding whether
+      // a payload fits.
+      // Blocks: 4 (legacy id) + 8,9,10 + 12,13,14 + 16,17 + the 12 string2 blocks
+      // + 36 (commit marker). Sector trailers are not counted -- they hold Crypto1
+      // keys, not payload.
+      capacityBytesOut = PN5180_ID_BYTES          // block 4, legacy id (12 of 16 B used)
+                       + 16 * 3                   // blocks 8,9,10   numeric/magic
+                       + MIFARE_EXT_STRING_BYTES  // blocks 12,13,14 first string buffer
+                       + 16 * 2                   // blocks 16,17    v3 packed numerics
+                       + MIFARE_EXT_STRING2_BYTES // blocks 20-34    second string buffer
+                       + 16;                      // block 36        commit marker
     } else {
       writeFormatOut = "openSpool"; formatLabelOut = "OpenSpool";
       // NTAG213/215/216 differ 6x in user memory (144/504/888 B) and only GET_VERSION
@@ -1665,6 +1678,12 @@ void startWebServer() {
     doc["ready"] = pn5180IsReady();
     bool present = (g_nfcProbe.type != PN5180_TAG_NONE);
     doc["present"] = present;
+    // False while a tag was detected but its Extended read has not finished (a few
+    // hundred ms on NTAG). A caller that polls once and acts on the answer should
+    // require present && complete; one that polls continuously can ignore it and
+    // simply see the fields settle. Absent on firmware older than this field, so
+    // treat a missing value as "unknown" rather than as false.
+    doc["complete"] = present && g_nfcProbe.complete;
     doc["type"] = (int)g_nfcProbe.type;           // 0=none,1=NFC-V,2=NFC-A
     doc["typeName"] = pn5180TagTypeName(g_nfcProbe.type);
     doc["uid"] = g_nfcProbe.uid;
@@ -2294,6 +2313,20 @@ void startWebServer() {
   // (done=true seen), g_nfcWritePending clears so a new write can start.
   server.on("/nfcwritestatus", []() {
     JsonDocument doc;
+    // ?peek=1 reads the result WITHOUT consuming it: the status is normally cleared by
+    // whoever fetches it first, so a second reader sees done:false/pending:false and
+    // cannot tell "already collected" from "nothing happened". That bit a real
+    // observer -- a monitoring script polling this endpoint swallowed the write
+    // results another client was waiting for, and that client looked like it had a
+    // polling bug of its own. A peek lets an observer follow along without taking the
+    // result away from the client that actually issued the write.
+    // The status-consuming side effects (clearing the flags, and the LED flash that
+    // announces the outcome) are ALL skipped on a peek, not just the flags: flashing
+    // the result LED once per observer would turn a passive read into something the
+    // user sees.
+    bool peek = server.hasArg("peek") &&
+                (server.arg("peek") == "1" || server.arg("peek") == "true");
+    doc["peek"] = peek;
     doc["pending"] = g_nfcWritePending && !g_nfcWriteDone;
     doc["done"] = g_nfcWriteDone;
     if (g_nfcWriteDone) {
@@ -2370,14 +2403,16 @@ void startWebServer() {
       }
       // Green = clean write, amber = written but stripped down (see nfcWriteDropWarning),
       // red = failed. The amber case would otherwise look identical to a full success.
-      if (!g_nfcWriteOk) ledFlash(pixel.Color(LED_BRIGHT * 2, 0, 0), 1500);           // red
-      else if (g_nfcWriteKind == NFCWRITE_SPOOL &&
-               nfcWriteDropWarning(g_nfcWriteDroppedFields, g_nfcWriteFormat).length())
-        ledFlash(pixel.Color(LED_BRIGHT * 3, LED_BRIGHT * 2, 0), 1500);               // amber
-      else ledFlash(pixel.Color(0, LED_BRIGHT * 3, 0), 1500);                          // green
-      g_nfcWriteDone = false;     // consumed -> next poll reports idle
-      g_nfcWritePending = false; // /nfcwriteid|/nfcwritespool|/nfcerase can accept a new request
-      g_nfcWriteDoneAt = 0;
+      if (!peek) {
+        if (!g_nfcWriteOk) ledFlash(pixel.Color(LED_BRIGHT * 2, 0, 0), 1500);         // red
+        else if (g_nfcWriteKind == NFCWRITE_SPOOL &&
+                 nfcWriteDropWarning(g_nfcWriteDroppedFields, g_nfcWriteFormat).length())
+          ledFlash(pixel.Color(LED_BRIGHT * 3, LED_BRIGHT * 2, 0), 1500);             // amber
+        else ledFlash(pixel.Color(0, LED_BRIGHT * 3, 0), 1500);                        // green
+        g_nfcWriteDone = false;     // consumed -> next poll reports idle
+        g_nfcWritePending = false; // /nfcwriteid|/nfcwritespool|/nfcerase can accept a new request
+        g_nfcWriteDoneAt = 0;
+      }
     }
     String out;
     serializeJson(doc, out);
@@ -4089,6 +4124,10 @@ void pn5180Task(void *param) {
         // already carries this poll's own value. The normal branch has to be explicit
         // because it only ever writes individual fields of g_nfcProbe, so anything it
         // does not assign survives from whatever ran before it.
+        // Debug mode reads everything it is going to read within this one poll (the
+        // gated block above fills the cache on a change, and pn5180Probe itself covers
+        // the rest), so the published result is never half-finished here.
+        pr.complete = (pr.type != PN5180_TAG_NONE);
         g_nfcProbe = pr;
       } else {
         // NORMAL OPERATION: read a tag (NFC-V OR NFC-A) + trigger the load flow.
@@ -4101,6 +4140,10 @@ void pn5180Task(void *param) {
           g_pn5180Uid = uidHex;
           g_nfcProbe.type = type;  // tag type for the TFT (short readout under the weight)
           g_nfcProbe.uid = uidHex;
+          // A newly arrived tag is incomplete until the gated block below has run its
+          // Extended read and occupancy probes. For a tag already seen, the cache is
+          // still valid, so the data stays complete across polls.
+          if (uidHex != g_lastUid) g_nfcProbe.complete = false;
           // Keep idParsed in step with type/uid on EVERY poll, the same way the debug
           // branch above does. Both branches gate their expensive work on "the tag
           // changed", but they use SEPARATE state to decide that (this one g_lastUid,
@@ -4251,6 +4294,9 @@ void pn5180Task(void *param) {
             // poll; this one covers the arrival itself, where the cache was only just
             // filled a few lines ago.
             g_nfcProbe.idParsed = id; g_nfcProbe.idText = idText;
+            // Extended read, classification and occupancy are done -- everything a
+            // caller reads out of g_nfcProbe now describes this tag.
+            g_nfcProbe.complete = true;
             flowOnTagPresent(id, uidHex);
           }
           // A trigger parked by the post-write suppression window: retry it once the

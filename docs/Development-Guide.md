@@ -131,7 +131,7 @@ The encoder and buttons use internal pull-ups; the other side of each switch con
 
 The reader supports database-ID writes as well as extended spool payloads. Extended payload formats are selected by tag family and can include material, vendor, color, diameter, weights, and temperatures. NFC-V and NTAG formats may use either the project layout or OpenSpool-compatible NDEF where supported.
 
-Keep NFC work asynchronous at the HTTP boundary: start operations with the existing start endpoints, poll their status endpoints, and avoid long reader calls in request handlers. Unknown tags can be inspected through the raw dump/image paths without changing the normal spool flow.
+Keep NFC work asynchronous at the HTTP boundary: start operations with the existing start endpoints, poll their status endpoints, and avoid long reader calls in request handlers. `/nfcwritestatus` hands out each write result exactly once and clears it, so a second reader cannot tell "someone already collected it" from "nothing happened" — pass `?peek=1` to read the result without consuming it (and without the LED flash that announces the outcome) when something other than the issuing client wants to follow along. Unknown tags can be inspected through the raw dump/image paths without changing the normal spool flow.
 
 ### Vendored PN5180 patches
 
@@ -165,6 +165,8 @@ Proof, where it exists, comes from a second source. `occupancy` reads the Capabi
 | `""` | No ID was parsed. |
 
 `extendedNoId` is deliberately not `""`. Both mean "no usable ID", but the tag is not blank: it holds structured data from a format this firmware can read. A consumer that collapses the two will offer to overwrite a TigerTag.
+
+A tag that has just been placed on the reader is published in two steps: type and UID appear as soon as it answers, because the display needs them at once, while the ID and the format fields are only filled after the Extended read and the occupancy probes have run — a few hundred milliseconds on NTAG. `/nfcprobe` reports `complete: false` for that window. A consumer that polls continuously can ignore the flag and watch the fields settle; one that asks once and acts on the answer should require `present && complete`, or it may see an Extended tag as an empty one and offer to overwrite it. Firmware older than this field omits it, so treat a missing value as unknown rather than as false.
 
 `idSource` is a reported judgement, not an input to the flow. The load flow reaches its own verdict from the raw values — `hasExtendedData` and `occupancy` — and `flowWouldUse` only consults `idSource` to exclude `unverified`. Keep it that way: the firmware decides on what it read, the consumer receives the summary. It also means the current formats' habit of leaving `idParsed` at `-1` whenever `extendedNoId` applies is a property of those formats, not a guarantee of the field. A future format with both a verified magic and a populated legacy area would break that assumption, so do not build logic on it without checking the callers again.
 
