@@ -33,6 +33,22 @@ Use an IP address for OTA. Hostname resolution through mDNS can introduce long d
 
 The reference board uses a WCH USB-UART bridge. The firmware is configured to use UART0 for the serial console rather than native USB-CDC. Keep the USB-CDC boot setting consistent with `platformio.ini` when changing board configurations.
 
+### Dev build numbering
+
+Every local build appends a running number to the version it reports — `0.0.3-dev7` rather than `0.0.3` — and copies its images into `artifacts/`. Flashing the same release version twice is otherwise indistinguishable on the display, in the web UI and over HTTP, which makes "which build is on the device?" unanswerable during a test session.
+
+`tools/dev_build.py` runs as a pre-script for both environments. It increments a counter, passes the result in as `FW_DEV_BUILD`, and after linking writes `artifacts/octoscale-<version>-<env>.bin`, the identical `-ota.bin`, and the matching `.elf`. Keep the `.elf`: a backtrace from the serial monitor cannot be resolved once the build it came from has been overwritten.
+
+The counter lives in `artifacts/.devcounter`, outside version control by way of `artifacts/` already being ignored. A number that changes on every build would otherwise make every test flash look like a source change. `src/version.h` keeps the release number in `FW_VERSION_RELEASE` and falls back to it when `FW_DEV_BUILD` is absent, so a clean checkout, a CI build or a release build reports a plain version with no dev suffix. Rename one of those macros and the script's pattern has to follow, or the version silently reads as `0.0.0`.
+
+Check what actually shipped by reading the binary rather than the build log, which only shows what the script intended:
+
+```bash
+strings artifacts/octoscale-0.0.3-dev1-esp32s3.bin | grep -o "0\.0\.3-dev[0-9]*"
+```
+
+The dev number separates local builds from each other; it does not make released versions unambiguous. Twenty-one commits shipped between the 0.0.2 and 0.0.3 bumps, all reporting the same version. Treat `fwVersion` and `currentVersion` as diagnostics rather than as a behaviour switch, and do not branch on them: a version that stays constant across that many commits separates nothing, and a later bump marks only devices built after it, never the ones already in the field. Where a consumer needs to know whether a capability exists, test for the field itself — `idSource` is simply absent on firmware that predates it.
+
 ## Boot and memory configuration
 
 The ESP32-S3-N16R8 configuration requires:
@@ -130,6 +146,34 @@ Recheck all four when updating the vendored library. NFC-A probing also requires
 
 The legacy database ID is an ASCII decimal value stored in the tag's legacy area. Extended payload reads happen before flow lookup and take priority over the legacy ID. This ordering matters because an OpenSpool NTAG payload can overwrite the legacy pages and stores its ID as `os_db_id` in the NDEF/JSON data instead.
 
+### Trusting a parsed database ID
+
+The legacy layout is digits followed by space padding, with no magic number and no checksum. Nothing in it identifies the tag as ours. A third-party tag that happens to carry ASCII digits at the same offset — an inventory number, for instance — parses exactly like a tag this firmware wrote, and no amount of reading that field harder can tell the two apart.
+
+The parser therefore only rejects shapes our own writers cannot produce: trailing content that is not padding, more than one run of digits, a leading zero, or more than ten digits. Everything surviving that is plausible, not proven.
+
+It also requires the digit run to end inside the buffer it was given, with at least one padding byte visible. `pn5180ReadNfcvId` passes however many bytes it managed to read, so a block failing mid-field used to yield a prefix of the real ID — a five-digit ID read as four bytes returned a different, entirely plausible, wrong spool, with no error anywhere. The ten-digit ceiling is mirrored in the three ID writers; a wider value would be written and verified, then read back as `-1` for the rest of the tag's life.
+
+Proof, where it exists, comes from a second source. `occupancy` reads the Capability Container and the start of the data area, so it knows whether the tag carries a format this firmware wrote; the ID parser reads a fixed offset and knows nothing about the CC. `/nfcprobe` reports the combined judgement as `idSource`:
+
+| `idSource` | Meaning |
+| --- | --- |
+| `extended` | The ID arrived with a verified format magic (`OX`, `OS`, OpenSpool NDEF, TigerTag). As trustworthy as the format it came from. |
+| `legacy` | The ID came from the header-less field and passed the shape check. Plausible, unverifiable. |
+| `unverified` | A `legacy` ID on a tag whose `occupancy` is `foreign`. The data area belongs to a format this firmware did not write, so the digits are most likely someone else's numbering. |
+| `extendedNoId` | A verified format that carries no database ID of ours at all — TigerTag and OpenPrintTag both describe a spool without referencing this database. |
+| `""` | No ID was parsed. |
+
+`extendedNoId` is deliberately not `""`. Both mean "no usable ID", but the tag is not blank: it holds structured data from a format this firmware can read. A consumer that collapses the two will offer to overwrite a TigerTag.
+
+`idSource` is a reported judgement, not an input to the flow. The load flow reaches its own verdict from the raw values — `hasExtendedData` and `occupancy` — and `flowWouldUse` only consults `idSource` to exclude `unverified`. Keep it that way: the firmware decides on what it read, the consumer receives the summary. It also means the current formats' habit of leaving `idParsed` at `-1` whenever `extendedNoId` applies is a property of those formats, not a guarantee of the field. A future format with both a verified magic and a populated legacy area would break that assumption, so do not build logic on it without checking the callers again.
+
+`idParsed` keeps the raw value even when `idSource` is `unverified`, because `/nfcprobe` is a diagnostic endpoint and "there are digits here, but they are not credible" is worth more to a caller than a bare `-1` that cannot be told apart from an empty field. The judgement, not the value, is what consumers should branch on. `flowWouldUse` and the load flow both refuse an `unverified` ID and fall back to the UID lookup.
+
+Note that `occupancy` alone is not that judgement. A tag written through `/nfcwriteid` onto previously NDEF-formatted material reports `foreign` while carrying a perfectly real ID, and an extended tag can report `foreign` because `occupancy` only inspects the CC and the first user page. Branching on `occupancy` instead of `idSource` discards both. Firmware older than this field omits it entirely, so a consumer that needs to support both should treat a missing `idSource` as "unknown, ask the user" rather than inferring one from `occupancy`.
+
+`writeFormat` and `formatLabel` answer a different question again: which format this firmware *would* write if asked right now. They are derived from the tag family alone and say nothing about what is currently on the tag — every non-Classic NFC-A tag reports `openSpool` whether or not it holds any NDEF at all. Use `hasExtendedData`, `occupancy`, and `idSource` to find out what a tag actually carries.
+
 ## Display, LED, and buzzer
 
 The TFT uses TFT_eSPI configured through `platformio.ini` build flags. The backlight is controlled by LEDC PWM on GPIO 41; do not hand the backlight pin to TFT_eSPI in a way that lets display initialization override the PWM.
@@ -175,7 +219,7 @@ The UI-independent flow is:
 
 `idle -> db_check -> ask_action -> ask_printer -> ask_tool -> loading` or `weigh_confirm -> weighing -> done/error`
 
-The reader task detects the tag and raises a flow request. The networking loop performs the blocking SpoolManager call. Database lookup uses the database ID when available and falls back to the tag UID for foreign tags. Loading fetches the printer's tool count before selecting a tool. Weighing uses the live gross reading and only offers a remaining-weight calculation when empty and total spool weights are known.
+The reader task detects the tag and raises a flow request. The networking loop performs the blocking SpoolManager call. Database lookup uses the database ID when one is available and credible, and falls back to the tag UID for foreign tags. An ID parsed out of the header-less legacy area of a tag whose `occupancy` is `foreign` is deliberately not used (see "Trusting a parsed database ID"); the flow treats such a tag as having no ID at all and says so on the display, rather than silently loading whichever spool happens to share that number. Loading fetches the printer's tool count before selecting a tool. Weighing uses the live gross reading and only offers a remaining-weight calculation when empty and total spool weights are known.
 
 Tag removal keeps action/printer/tool selection open for the configured timeout. The weighing states are exempt because the spool can hide its tag while it remains on the scale. Keep this state-machine behavior independent of whether the request came from the TFT or web UI.
 

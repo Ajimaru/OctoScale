@@ -682,6 +682,12 @@ volatile bool g_flowEmptyTag = false;    // ... or a verified-blank one (occupan
 // Foreign tag (e.g. Snapmaker): no databaseId payload on the tag, only a UID ->
 // runDbCheck() resolves it via spoolExistsByCode() instead of spoolExists(id).
 bool g_flowLookupByCode = false;
+// Set when a tag carried a legacy-parsed id that was rejected as not credible (foreign
+// occupancy, no format magic -- see flowOnTagPresent). Purely for the message shown:
+// "there IS a number on this tag, we are deliberately not using it" is a different
+// thing to tell the user than "this tag has no number at all", and without saying so
+// the device looks like it simply failed to read a tag the browser shows an id for.
+bool g_flowUntrustedId = false;
 String g_flowLookupUid = "";
 
 // TFT menu delegation: the three blocking flow transitions (flowDoPrinter/Tool/
@@ -1073,7 +1079,8 @@ static void runDbCheck() {
       bool cacheFresh = (g_nfcExtCacheUid == g_pn5180Uid);
       g_flowForeignTag = cacheFresh && g_nfcExtCacheOccupancy == "foreign";
       g_flowEmptyTag   = cacheFresh && g_nfcExtCacheOccupancy == "empty";
-      g_flowMsg = g_flowForeignTag  ? "Not in database - add it in the browser"
+      g_flowMsg = g_flowUntrustedId ? "Foreign tag, number ignored - add it in the browser"
+                : g_flowForeignTag  ? "Not in database - add it in the browser"
                 : g_flowEmptyTag    ? "Ready to write"
                 : g_flowLookupByCode ? "Tag UID not assigned to a spool"
                                      : "Spool not in database";
@@ -1093,6 +1100,7 @@ static void flowReset(bool rearmSameTag = true) {
   g_flowSpoolName = "";
   g_flowForeignTag = false;
   g_flowEmptyTag = false;
+  g_flowUntrustedId = false;
   g_flowPrinter = -1;
   g_flowToolCount = 0;
   g_flowTool = -1;
@@ -1696,11 +1704,32 @@ void startWebServer() {
     // normal load flow; none -> falls back to a UID lookup (spool/byCode) if present.
     doc["idParsed"] = g_nfcProbe.idParsed;
     doc["idText"] = g_nfcProbe.idText;
+    // How trustworthy idParsed is: "extended" (came with a format magic), "legacy"
+    // (header-less ASCII field, shape-validated only), "unverified" (legacy AND the
+    // tag's occupancy says the data belongs to a foreign format -> almost certainly
+    // not our id), "" (no id). Computed here rather than in the probe itself because
+    // occupancy lives in the per-UID Extended cache, which the probe does not read.
+    // Without this, idParsed and occupancy could contradict each other in this very
+    // response -- a foreign tag with an inventory number "81" reported occupancy
+    // "foreign" and idParsed 81 side by side.
+    String idSource;
+    {
+      bool cacheFresh = present && g_nfcExtCacheUid == g_nfcProbe.uid;
+      pn5180ApplyIdTrust(g_nfcProbe.idParsed,
+                         cacheFresh ? g_nfcExtCacheOccupancy : String(""),
+                         cacheFresh && g_nfcExtCacheHasExtended,
+                         idSource);
+      doc["idSource"] = idSource;
+    }
     // Capability Container state (NFC-A/NTAG + NFC-V only, debug mode only -- see
     // pn5180ProbeCcState). "virgin"/"ndef"/"other", "" = n/a (Mifare, or not read).
     doc["ccState"] = g_nfcProbe.ccState;
+    // An "unverified" id is NOT offered as a databaseId: acting on it would load (or
+    // overwrite) a spool that merely shares its number with a foreign tag's own
+    // numbering. Falls back to the UID lookup, same as a tag with no id at all.
     doc["flowWouldUse"] = present
-      ? (g_nfcProbe.idParsed >= 0 ? "databaseId" : "uid (byCode lookup)")
+      ? ((g_nfcProbe.idParsed >= 0 && idSource != "unverified") ? "databaseId"
+                                                                : "uid (byCode lookup)")
       : "none";
     // Tag-type/format info (plan A.1) -- from the per-UID cache, populated on every
     // new-tag event regardless of debug mode (see the poll loop). "data" mirrors
@@ -3163,6 +3192,25 @@ static void flowOnTagPresent(long id, const String &uid) {
     return;
   }
   if (!flowIdle) return;
+  // Cleared on every accepted trigger, not just in flowReset(): a rejected tag can be
+  // followed by a good one without the flow passing through flowReset() in between
+  // (FLOW_UNKNOWN is itself an idle state, so the next tag enters here directly), and a
+  // stale flag would mislabel that good tag's message.
+  g_flowUntrustedId = false;
+  // An id parsed out of the header-less legacy field on a tag whose occupancy says
+  // "foreign" is not credible: the legacy layout has no magic, so a third-party tag
+  // carrying ASCII digits at the same offset (an inventory number, say) parses exactly
+  // like one of ours. Acting on it would load a spool that merely shares that number --
+  // and on a write, could assign our data to the wrong spool or overwrite the other
+  // vendor's tag. Fall back to the UID lookup, which is what a tag with no id does.
+  // hasExtended ids are exempt: those matched a real format magic.
+  if (id >= 0 && g_nfcExtCacheUid == uid && !g_nfcExtCacheHasExtended &&
+      g_nfcExtCacheOccupancy == "foreign") {
+    dbgLogf("Flow: tag %s has legacy id %ld but foreign occupancy -> not trusted, "
+            "falling back to byCode lookup", uid.c_str(), id);
+    id = -1;
+    g_flowUntrustedId = true;
+  }
   if (id >= 0) {
     g_flowLookupByCode = false;
     g_flowSpoolId = id;
@@ -3660,10 +3708,26 @@ void pn5180Task(void *param) {
         g_nfcDumpAuthOkSectors = 0;
         for (int i = 0; i < g_nfcDumpCount; i += 3)
           if (g_nfcDumpBlocks[i].sectorAuthOk) g_nfcDumpAuthOkSectors++;
-        ok = g_nfcDumpCount > 0;
-        if (!ok) g_nfcDumpErr = "dump failed (no blocks read)";
-        dbgLogf("pn5180Task: dump result ok=%d blocks=%d authSectors=%d/16 ms=%lu",
-                ok, g_nfcDumpCount, g_nfcDumpAuthOkSectors, (unsigned long)g_nfcDumpMs);
+        // Count rows that actually carry data, not rows that exist. pn5180Dump-
+        // MifareClassic1k emits all 48 rows regardless of outcome, marking the
+        // unreadable ones readOk:false -- so "count > 0" was true even when Crypto1
+        // auth failed on every single sector and not one byte of payload came back.
+        // Measured on a real tag: authOkSectors 0, all 48 rows readOk:false, 0 bytes,
+        // and the endpoint still reported ok:true with an empty error.
+        // Deliberately NOT keyed on authOkSectors: that counter is structurally 0 on
+        // NTAG and NFC-V (neither has an auth concept), so using it as the failure
+        // indicator would break those two carriers. readOk is the one field every
+        // carrier fills the same way.
+        int readableBlocks = 0;
+        for (int i = 0; i < g_nfcDumpCount; i++)
+          if (g_nfcDumpBlocks[i].readOk) readableBlocks++;
+        ok = readableBlocks > 0;
+        if (!ok) g_nfcDumpErr = g_nfcDumpAuthOkSectors == 0
+                              ? "dump failed (no sector authenticated -- wrong key?)"
+                              : "dump failed (no blocks read)";
+        dbgLogf("pn5180Task: dump result ok=%d rows=%d readable=%d authSectors=%d/16 ms=%lu",
+                ok, g_nfcDumpCount, readableBlocks, g_nfcDumpAuthOkSectors,
+                (unsigned long)g_nfcDumpMs);
       }
       g_pn5180->reset(); g_pn5180->setupRF();  // back to normal ISO15693 operation
       g_nfcDumpOk = ok;
@@ -3939,12 +4003,18 @@ void pn5180Task(void *param) {
                            g_nfcExtCacheFormatLabel, g_nfcExtCacheCapacityBytes,
                            pr.numPages, pr.numPagesPresent);
             g_nfcExtCacheUid = pr.uid;
-            bool dummyHasExt; PN5180TagType dummyType; long dummyId; String dummyUid, dummyText;
+            bool dummyHasExt; PN5180TagType dummyType; long extId; String dummyUid, dummyText;
             String nfcvFormatFound;
             int nfcvCapacityFound = -1;
-            if (pn5180ReadSpoolExOpt(dummyType, dummyId, dummyUid, dummyText, g_nfcExtCacheData,
+            if (pn5180ReadSpoolExOpt(dummyType, extId, dummyUid, dummyText, g_nfcExtCacheData,
                                   dummyHasExt, &nfcvFormatFound, &nfcvCapacityFound)) {
               g_nfcExtCacheHasExtended = dummyHasExt;
+              // NOTE: the Extended id is NOT substituted here. It used to be, and that
+              // was not enough -- this block is change-gated (type/uid differ), while
+              // the "g_nfcProbe = pr" below runs on every poll and put the raw legacy
+              // parse back. The substitution therefore lives at that assignment, driven
+              // by the cache this block fills. Keep it in exactly one place: two copies
+              // would silently disagree on any poll where only one of them ran.
               if (dummyHasExt && pr.type == PN5180_TAG_NFCV && nfcvFormatFound.length()) {
                 g_nfcExtCacheWriteFormat = nfcvFormatFound;
                 g_nfcExtCacheFormatLabel = (nfcvFormatFound == "nfcvOpenSpool")
@@ -3998,6 +4068,27 @@ void pn5180Task(void *param) {
             }
           }
         }
+        // Extended id substitution, applied on EVERY poll rather than only inside the
+        // change-gated block above. The block only runs when type/uid differ from the
+        // last probe, but this assignment runs every time -- so on a tag left lying on
+        // the reader, pr.idParsed (the raw legacy parse, -1 on an Extended tag whose
+        // page 4 holds "OX...") overwrote the substituted value again on the very next
+        // poll. Measured on a real ntagExtended tag: idParsed flipped to -1 and
+        // idSource to "extendedNoId" as soon as NFC debug was switched on, although
+        // the Extended read itself had succeeded and extended.databaseId read 120
+        // throughout. Taking the id from the cache rather than from the block's local
+        // makes the value independent of whether the block ran on this particular poll.
+        if (g_nfcExtCacheHasExtended && g_nfcExtCacheUid == pr.uid &&
+            g_nfcExtCacheData.databaseId >= 0) {
+          pr.idParsed = g_nfcExtCacheData.databaseId;
+          pr.idText = String(g_nfcExtCacheData.databaseId);
+        }
+        // No else needed here, unlike the normal branch below: pr comes straight out of
+        // pn5180Probe(), which ran its own legacy ID read this very poll, and the
+        // assignment below replaces g_nfcProbe wholesale. A non-Extended tag therefore
+        // already carries this poll's own value. The normal branch has to be explicit
+        // because it only ever writes individual fields of g_nfcProbe, so anything it
+        // does not assign survives from whatever ran before it.
         g_nfcProbe = pr;
       } else {
         // NORMAL OPERATION: read a tag (NFC-V OR NFC-A) + trigger the load flow.
@@ -4010,6 +4101,32 @@ void pn5180Task(void *param) {
           g_pn5180Uid = uidHex;
           g_nfcProbe.type = type;  // tag type for the TFT (short readout under the weight)
           g_nfcProbe.uid = uidHex;
+          // Keep idParsed in step with type/uid on EVERY poll, the same way the debug
+          // branch above does. Both branches gate their expensive work on "the tag
+          // changed", but they use SEPARATE state to decide that (this one g_lastUid,
+          // the other g_nfcProbe.type/uid). Toggling NFC debug hands the poll to the
+          // other branch, whose gate is still closed from the last real tag change --
+          // so neither branch refreshes idParsed and whatever the previously active
+          // branch left there stays, across the switch. Measured on a tag left lying on
+          // the reader: idParsed kept reading -1 for several polls AFTER debug was
+          // switched back off, then flipped to 120 again, with the tag never touched.
+          // The cache is filled by whichever branch last saw the tag arrive, so reading
+          // the id from it makes the reported value independent of which branch is
+          // currently active and of whether its gate happened to fire this poll.
+          if (g_nfcExtCacheHasExtended && g_nfcExtCacheUid == uidHex &&
+              g_nfcExtCacheData.databaseId >= 0) {
+            g_nfcProbe.idParsed = g_nfcExtCacheData.databaseId;
+            g_nfcProbe.idText = String(g_nfcExtCacheData.databaseId);
+          } else {
+            // No Extended id to substitute: report what this poll's own read found.
+            // pn5180ReadSpool() has just run unconditionally above, so `id` is current
+            // for THIS tag -- unlike the cache, which may still describe a tag that has
+            // since been taken off. Without this, a legacy or blank tag kept whatever
+            // the previously active branch left in idParsed, which is the same stale
+            // value the Extended case above fixes.
+            g_nfcProbe.idParsed = id;
+            g_nfcProbe.idText = idText;
+          }
           g_flowAskGoneSince = 0;  // tag present -> the UI's auto-reset countdown is off
           if (uidHex != g_lastUid) {  // new tag -> handle it once
             g_lastUid = uidHex;
@@ -4128,6 +4245,11 @@ void pn5180Task(void *param) {
                           uidHex.c_str(), pn5180TagTypeName(type), id);
             dbgLogf("NFC read: %s type=%s id=%ld text=%s", uidHex.c_str(),
                     pn5180TagTypeName(type), id, idText.c_str());
+            // `id` has been through the Extended substitution above, so this is the
+            // authoritative value for the newly arrived tag. The per-poll assignment
+            // near the top of this branch repeats it from the cache on every later
+            // poll; this one covers the arrival itself, where the cache was only just
+            // filled a few lines ago.
             g_nfcProbe.idParsed = id; g_nfcProbe.idText = idText;
             flowOnTagPresent(id, uidHex);
           }
