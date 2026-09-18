@@ -1488,17 +1488,27 @@ inline int pn5180DumpMifareClassic1kEx(const String &uidHex, MifareBlockDump *ou
   for (uint8_t sector = 0; sector < 16; sector++) {
     if (!(sectorMask & (1u << sector))) continue;
     uint8_t trailerBlock = sector * 4 + 3;
+    // Authenticate against the sector's first DATA block, not its trailer. Crypto1 auth
+    // is sector-wide, so either address unlocks the same sector -- but measured on a
+    // real 1K tag (UID 0B06703B, factory key), a trailer-addressed auth never gets a
+    // response back: every sector returned the uninitialised status 0xFF, including the
+    // two that reported ok=1, so even those were transport artefacts rather than
+    // successful authentications. The same key and mode against block 4 answers
+    // status=0x00 on every single poll, which is why the normal read path
+    // (pn5180ReadMifareExtended, block 4/8/12/16/36) always worked on the very tag whose
+    // dump failed completely. That contradiction stood unexplained since 2026-08-29.
+    uint8_t authBlock = sector * 4;
     String authErr;
     // Key A first, then Key B -- a rejected key costs one failed auth, and the tag
     // stays selected only as long as auth succeeds, so the retry re-selects below.
-    bool authOk = pn5180MifareAuth(uidHex, trailerBlock, authErr,
+    bool authOk = pn5180MifareAuth(uidHex, authBlock, authErr,
                                    keyA ? keyA[sector] : MIFARE_KEY_A, MIFARE_AUTH_KEY_A);
     if (!authOk && keyB) {
       // A failed auth drops the card out of the selected state -- without re-selecting,
       // the Key B attempt would fail for the wrong reason and look like a bad key.
       PN5180ProbeResult reselect;
       if (pn5180ProbeNfcA(reselect) && reselect.uid == uidHex)
-        authOk = pn5180MifareAuth(uidHex, trailerBlock, authErr,
+        authOk = pn5180MifareAuth(uidHex, authBlock, authErr,
                                   keyB[sector], MIFARE_AUTH_KEY_B);
     }
     uint8_t lastBlock = withTrailers ? trailerBlock : (uint8_t)(trailerBlock - 1);

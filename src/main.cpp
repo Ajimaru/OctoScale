@@ -1219,6 +1219,15 @@ static void flowDoWeighSave() {
     g_flowMsg = "Weight saved";
     buzzerSuccess();  // success tone + synced green LED pulse: weight saved
 
+    // Carry the newly measured remaining weight into the flow state. g_flowRemaining is
+    // otherwise only ever filled by the DB lookup at the START of the flow, so after a
+    // successful save both /flow/status and the TFT kept showing the PRE-weigh figure
+    // -- measured: the tag and the database read 696 g while the display still said
+    // 355 g. The gross reading and the empty-spool weight are both known here, so the
+    // value needs no second round-trip.
+    if (g_flowSpoolWeight >= 0.0f && g_flowGrossWeight >= 0.0f)
+      g_flowRemaining = g_flowGrossWeight - g_flowSpoolWeight;
+
     // Mirror the new remaining weight onto the tag -- the reader sits right at the
     // scale, so the spool that was just weighed is still on it. DB save already
     // succeeded above; a tag-sync problem here is reported as a warning only (per
@@ -1905,6 +1914,16 @@ void startWebServer() {
   // no TFT lock screen to race with, so there's no reason to delay it).
   server.on("/nfcdumpstatus", []() {
     JsonDocument doc;
+    // ?peek=1 reads the result without consuming it -- same contract as
+    // /nfcwritestatus, and for the same reason: the result is handed out exactly once,
+    // so a passive observer (a monitor watching alongside the client that started the
+    // dump) would otherwise take it away from that client. This endpoint was missed
+    // when peek was added to the write status, and the inconsistency was found by the
+    // SpoolManager session rather than by us: peek worked there, silently did nothing
+    // here, and the second read came back empty.
+    bool peek = server.hasArg("peek") &&
+                (server.arg("peek") == "1" || server.arg("peek") == "true");
+    doc["peek"] = peek;
     doc["pending"] = g_nfcDumpPending;
     doc["done"] = g_nfcDumpDone;
     if (g_nfcDumpDone) {
@@ -1939,7 +1958,7 @@ void startWebServer() {
           b["hex"] = String(hex);
         }
       }
-      g_nfcDumpDone = false;  // consumed
+      if (!peek) g_nfcDumpDone = false;  // consumed
     }
     String out;
     serializeJson(doc, out);
@@ -2042,6 +2061,16 @@ void startWebServer() {
   // /nfcwritestatus -- a caller stops polling as soon as it sees done:true.
   server.on("/nfcreadstatus", []() {
     JsonDocument doc;
+    // ?peek=1 reads without consuming -- the third endpoint with this contract, after
+    // /nfcwritestatus and /nfcdumpstatus. All three hand out their result exactly once,
+    // so any observer polling alongside the client that started the operation would
+    // take the result away from it. Added here proactively: the same inconsistency was
+    // found on the dump endpoint by an external consumer after peek had been added only
+    // to the write status. If a fourth single-shot status is ever added, it needs this
+    // too.
+    bool peek = server.hasArg("peek") &&
+                (server.arg("peek") == "1" || server.arg("peek") == "true");
+    doc["peek"] = peek;
     doc["pending"] = g_nfcReadPending;
     doc["done"] = g_nfcReadDone;
     if (g_nfcReadDone) {
@@ -2079,7 +2108,7 @@ void startWebServer() {
           if (requested && !ok) failed.add(s);
         }
       }
-      g_nfcReadDone = false;      // consumed
+      if (!peek) g_nfcReadDone = false;      // consumed
       g_nfcReadPending = false;
     }
     String out;
@@ -3734,6 +3763,31 @@ void pn5180Task(void *param) {
         g_nfcDumpTagType = "mifareClassic1k";
         dbgLogf("pn5180Task: dump request picked up, uid=%s", pr.uid.c_str());
         uint32_t dumpT0 = millis();
+        // Re-select before authenticating, for the same reason the NTAG branch above
+        // does it: pn5180Probe() ends with reset()+setupRF(), so the card is no longer
+        // selected here, and Crypto1 auth needs a live selection just as much as
+        // GET_VERSION does. Without it every sector failed with the uninitialised
+        // status 0xFF -- the chip never ran the RF handshake, so it never wrote a
+        // status byte back, and the occasional ok=1 was a transport artefact rather
+        // than a successful authentication. Traced on a real 1K tag (UID 0B06703B):
+        // the dump sent a byte-identical auth frame to the one the normal read path
+        // sends for block 4, and got RX FF where the read path gets RX 00. That is why
+        // /nfcdump failed on the very tag /nfcprobe was reading correctly at the same
+        // time -- a contradiction that stood unexplained since 2026-08-29.
+        PN5180ProbeResult mifSel;
+        if (!pn5180ProbeNfcA(mifSel) || mifSel.uid != pr.uid) {
+          g_nfcDumpErr = "tag moved away before the dump could start";
+          g_nfcDumpCount = 0;
+          g_nfcDumpUnitCount = 0;
+          g_nfcDumpMs = millis() - dumpT0;
+          g_nfcDumpAuthOkSectors = 0;
+          ok = false;
+          g_pn5180->reset(); g_pn5180->setupRF();
+          g_nfcDumpOk = ok;
+          g_nfcDumpDone = true;
+          g_nfcDumpPending = false;
+          continue;
+        }
         g_nfcDumpCount = pn5180DumpMifareClassic1k(pr.uid, g_nfcDumpBlocks);
         g_nfcDumpUnitCount = g_nfcDumpCount;   // 1 unit per row on Mifare
         g_nfcDumpMs = millis() - dumpT0;
