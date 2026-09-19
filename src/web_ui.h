@@ -333,6 +333,7 @@ static const char INDEX_HTML[] PROGMEM =
     "<symbol id='i-preview' viewBox='0 0 16 16'><path d='M1.4 8S3.8 3.6 8 3.6 14.6 8 14.6 8 12.2 12.4 8 12.4 1.4 8 1.4 8z'/><circle cx='8' cy='8' r='2'/></symbol>"
     "<symbol id='i-diag' viewBox='0 0 16 16'><path d='M9.6 2.2a3.4 3.4 0 0 0 4.2 4.2l-7 7a2 2 0 0 1-2.8-2.8z'/></symbol>"
     "<symbol id='i-console' viewBox='0 0 16 16'><rect x='1.8' y='2.8' width='12.4' height='10.4' rx='1'/><path d='M4.6 6.4l2 1.8-2 1.8M8.4 10.4h3'/></symbol>"
+    "<symbol id='i-restart' viewBox='0 0 16 16'><path d='M13.4 8a5.4 5.4 0 1 1-1.6-3.8'/><path d='M13.6 2.2v3.4h-3.4'/></symbol>"
     "</defs></svg>"
     "<main class='wrap'>"
 
@@ -1420,8 +1421,10 @@ static const char INDEX_HTML[] PROGMEM =
     // the whole card is rebuilt every poll -- a static button placed outside would
     // survive, but keeping it here means the reboot message below is wiped by the
     // next poll only after the device is actually gone.
-    "h+='<button onclick=\"reboot(event)\" class=\"danger\" style=\"margin-top:12px\">"
-    "\\u21BB Restart device</button>'"
+    "h+='<button onclick=\"reboot(event)\" class=\"danger\" style=\"margin-top:12px;"
+    "display:flex;align-items:center;justify-content:center;gap:7px\">"
+    "<svg class=\"ci\" style=\"width:15px;height:15px;margin:0;vertical-align:0;opacity:1\">"
+    "<use href=\"#i-restart\"/></svg>Restart device</button>'"
     "+'<div id=\"rbmsg\" class=\"note\" style=\"text-align:center;min-height:1.1em\"></div>';"
     "document.getElementById('sysbox').innerHTML=h;});}"
     // Reboot: the device dies mid-response, so there is no success callback to wait
