@@ -789,6 +789,18 @@ int g_flowToolCount = 0;      // tool count of the chosen printer (live)
 int g_flowTool = -1;          // chosen tool
 String g_flowMsg = "";        // status/error message for the UI
 volatile bool g_flowDbRequest = false;  // DB-check trigger from pn5180Task
+// UID the current flow belongs to ("" = none). Set on every accepted trigger, cleared
+// in flowReset(). Lets a swap be told apart from a re-trigger of the SAME tag: without
+// it, flowOnTagPresent could only ask "is the flow busy?", and answering yes meant a
+// spool swapped in while the ask_* menu was open was silently dropped -- the poll's
+// g_lastUid latch had already moved on to the new tag, so no later poll re-offered it
+// and both UIs kept showing the previous spool until the menu timed out.
+String g_flowUid = "";
+// Bumped on every accepted trigger. runDbCheck() runs in loop() (core 1) while the poll
+// (core 0) may start a NEW flow in the meantime; the check captures the generation it
+// started with and drops its result if it no longer matches, instead of publishing the
+// old spool's name/weights over the new spool's flow.
+volatile uint32_t g_flowGen = 0;
 // FLOW_UNKNOWN reached with a foreign vendor tag (occupancy=="foreign") rather than a
 // blank/unassigned one -- lets the TFT report it neutrally instead of as an error.
 volatile bool g_flowForeignTag = false;
@@ -1160,30 +1172,56 @@ static String flowStatusJson() {
 // Triggered via g_flowDbRequest from pn5180Task.
 static void runDbCheck() {
   g_flowDbRequest = false;
+  // The lookup below blocks for the length of an HTTP round-trip, during which
+  // pn5180Task (core 0) can see a tag swap and start a whole new flow. Everything this
+  // function publishes afterwards would then describe the tag that has just been taken
+  // off. Capture the generation up front and check it again before publishing.
+  uint32_t gen = g_flowGen;
+  long reqSpoolId = g_flowSpoolId;
+  bool reqByCode = g_flowLookupByCode;
+  String reqUid = g_flowLookupUid;
   // spoolExists() blocks (HTTP) -> ledTick() won't run again until it returns, so set
   // the solid "working" color up front instead of only after the fact.
   ledShow(idleColor());
   String name, err;
   bool known;
-  if (g_flowLookupByCode) {
-    dbgLogf("HTTP: GET spool/byCode/%s (instance %u)", g_flowLookupUid.c_str(), g_dbInstance);
+  // Written into locals first, copied onto the globals only once the generation check
+  // below confirms this result still belongs to the tag on the reader.
+  float spoolWeight = -1.0f, totalWeight = -1.0f, remaining = -1.0f;
+  String vendor, material, color, colorName;
+  if (reqByCode) {
+    dbgLogf("HTTP: GET spool/byCode/%s (instance %u)", reqUid.c_str(), g_dbInstance);
     // Foreign tag: resolve UID -> databaseId first, then continue exactly like a
     // native tag (g_flowSpoolId now holds the real databaseId for the rest of the flow).
     long id = -1;
-    known = spoolExistsByCode(g_flowLookupUid, id, name, err, &g_flowSpoolWeight,
-                              &g_flowTotalWeight, &g_flowVendor, &g_flowMaterial,
-                              &g_flowRemaining, &g_flowColor, &g_flowColorName);
-    if (known) g_flowSpoolId = id;
+    known = spoolExistsByCode(reqUid, id, name, err, &spoolWeight,
+                              &totalWeight, &vendor, &material,
+                              &remaining, &color, &colorName);
+    if (known) reqSpoolId = id;
     dbgLogf("HTTP: byCode -> known=%d databaseId=%ld instance=%d err=%s",
             known, id, g_dbUsedInstance, err.c_str());
   } else {
-    dbgLogf("HTTP: GET spool/%ld (instance %u)", g_flowSpoolId, g_dbInstance);
-    known = spoolExists(g_flowSpoolId, name, err, &g_flowSpoolWeight,
-                        &g_flowTotalWeight, &g_flowVendor, &g_flowMaterial,
-                        &g_flowRemaining, &g_flowColor, &g_flowColorName);
+    dbgLogf("HTTP: GET spool/%ld (instance %u)", reqSpoolId, g_dbInstance);
+    known = spoolExists(reqSpoolId, name, err, &spoolWeight,
+                        &totalWeight, &vendor, &material,
+                        &remaining, &color, &colorName);
     dbgLogf("HTTP: spool/%ld -> known=%d instance=%d err=%s",
-            g_flowSpoolId, known, g_dbUsedInstance, err.c_str());
+            reqSpoolId, known, g_dbUsedInstance, err.c_str());
   }
+  // Swapped tag while this was in flight -> the newer flow owns the state now.
+  if (gen != g_flowGen) {
+    dbgLogf("Flow: DB result for gen %u dropped (flow is at gen %u -- tag swapped)",
+            gen, (unsigned)g_flowGen);
+    return;
+  }
+  g_flowSpoolId    = reqSpoolId;
+  g_flowSpoolWeight = spoolWeight;
+  g_flowTotalWeight = totalWeight;
+  g_flowVendor      = vendor;
+  g_flowMaterial    = material;
+  g_flowRemaining   = remaining;
+  g_flowColor       = color;
+  g_flowColorName   = colorName;
   if (known) {
     g_flowSpoolName = name;
     g_flowMsg = "";
@@ -1230,6 +1268,7 @@ static void runDbCheck() {
 // Resets the flow (cancel / after completion).
 static void flowReset(bool rearmSameTag = true) {
   g_flowState = FLOW_IDLE;
+  g_flowUid = "";
   g_flowSpoolId = -1;
   g_flowSpoolName = "";
   g_flowForeignTag = false;
@@ -3451,7 +3490,35 @@ static void flowOnTagPresent(long id, const String &uid) {
     dbgLogf("Flow: suppressed for foreign tag %s (raw read in progress)", uid.c_str());
     return;
   }
-  if (!flowIdle) return;
+  // A different tag while a flow is up: the spool on the reader has been swapped, so
+  // the flow follows it. Previously any non-resting state made this return, which meant
+  // the swap was dropped -- and dropped for good, because the poll only calls us when
+  // the UID CHANGES (g_lastUid), and it had already latched the new one. Web UI and TFT
+  // then kept showing the old spool until the ask_* timeout or a manual cancel.
+  //
+  // The two blocking states are excluded: FLOW_LOADING and FLOW_WEIGHING are a
+  // half-finished HTTP call in loop() that writes g_flowState when it returns, so
+  // restarting underneath it would either lose the swap anyway or report the old call's
+  // result against the new spool. Those are short (one request) and end in DONE/ERROR,
+  // which IS a resting state, so the swap is picked up right after -- park it as a retry
+  // so the poll offers it again rather than losing it to the UID latch.
+  bool sameTag = (g_flowUid.length() && g_flowUid == uid);
+  if (!flowIdle && !sameTag) {
+    if (g_flowState == FLOW_LOADING || g_flowState == FLOW_WEIGHING) {
+      // Logged only on the first park: the poll re-offers a parked retry every tick, so
+      // while the HTTP call runs this re-parks itself several times per second.
+      if (g_flowRetryUid != uid)
+        dbgLogf("Flow: tag %s swapped in during a blocking call -> parked as retry", uid.c_str());
+      g_flowRetryUid = uid;
+      g_flowRetryId = id;
+      return;
+    }
+    dbgLogf("Flow: tag swapped (%s -> %s) in state %s -> restarting flow",
+            g_flowUid.c_str(), uid.c_str(), flowStateName(g_flowState));
+    flowReset(false);  // false: the NEW tag is on the reader, don't re-arm the latch
+  } else if (!flowIdle) {
+    return;  // same tag, flow already running for it -> nothing to do
+  }
   // Cleared on every accepted trigger, not just in flowReset(): a rejected tag can be
   // followed by a good one without the flow passing through flowReset() in between
   // (FLOW_UNKNOWN is itself an idle state, so the next tag enters here directly), and a
@@ -3489,6 +3556,22 @@ static void flowOnTagPresent(long id, const String &uid) {
   g_flowTool = -1;
   g_flowMsg = "";
   g_flowGrossWeight = 0.0f;
+  // Reference values from the PREVIOUS spool's DB lookup. runDbCheck() only assigns
+  // them when the lookup succeeds, so on a swap to a tag that isn't in the database the
+  // old spool's empty/total weight would still be sitting here and the weigh step would
+  // compute a remaining weight against the wrong reference.
+  g_flowSpoolName = "";
+  g_flowSpoolWeight = -1.0f;
+  g_flowTotalWeight = -1.0f;
+  g_flowRemaining = -1.0f;
+  g_flowVendor = "";
+  g_flowMaterial = "";
+  g_flowColor = "";
+  g_flowColorName = "";
+  g_flowForeignTag = false;
+  g_flowEmptyTag = false;
+  g_flowUid = uid;
+  g_flowGen++;             // invalidates a DB check still running for the previous tag
   g_flowState = FLOW_DB_CHECK;
   g_flowDbRequest = true;  // loop() runs the DB check
 }
