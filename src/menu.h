@@ -42,6 +42,18 @@ static uint16_t MENU_WEIGHT = ACCENT_AMBER;    // big readout = accent
 static const uint16_t MENU_OK   = 0x2648;      // green
 static const uint16_t MENU_ERR  = 0xE8E4;      // red
 static const uint16_t MENU_WARN = 0xC300;      // amber
+// Amber on white is weak -- it has enough luminance of its own that it stops separating
+// from a light background, which is exactly where a warning must not go quiet. The dark
+// theme keeps the amber (it reads well on black); the light theme takes a dark orange
+// that carries the same "caution" meaning at usable contrast. Set by menuApplyTheme().
+// Orange-red rather than the amber used elsewhere: on black, amber reads as one more
+// accent next to the amber weight readout, so the warning did not stand out at all. This
+// sits at 6.7:1 against black (amber: 5.1) and, more to the point, is a different hue
+// from anything else on the idle screen. Deliberately NOT MENU_ERR red -- that means
+// "broken" on the footer chips, and an unconfirmed zero point is not a fault.
+static const uint16_t WARN_DARK  = 0xFAC2;     // orange-red, for the dark theme
+static const uint16_t WARN_LIGHT = 0xB960;     // dark orange, for the light theme
+static uint16_t MENU_WARN_FG = WARN_DARK;      // theme-aware warning color
 #define MENU_HINT MENU_DIM
 
 // Apply the palette for the current theme (neutrals + accent).
@@ -50,12 +62,19 @@ static void menuApplyTheme() {
     MENU_BG = TFT_BLACK; MENU_TITLE = TFT_WHITE; MENU_RULE = 0x39C7;
     MENU_DIM = 0xAD75;   MENU_ROW_FG = 0xE71C;
     MENU_SEL_BG = ACCENT_AMBER; MENU_WEIGHT = ACCENT_AMBER; MENU_SEL_FG = 0x0000;
+    MENU_WARN_FG = WARN_DARK;
   } else {
     MENU_BG = TFT_WHITE; MENU_TITLE = 0x0000; MENU_RULE = 0xC618;
     MENU_DIM = 0x632C;   MENU_ROW_FG = 0x2124;
     MENU_SEL_BG = ACCENT_CYAN;  MENU_WEIGHT = ACCENT_CYAN;  MENU_SEL_FG = 0x0000;
+    MENU_WARN_FG = WARN_LIGHT;
   }
 }
+
+// Blink phase for warnings, shared so every blinking element on screen is in step
+// (two independent timers would drift apart and look broken). 700 ms is slow enough to
+// stay readable -- the text has to be legible in the ON phase, not just noticed.
+static bool menuWarnBlinkOn() { return (millis() / 700) % 2 == 0; }
 
 // --- Menu state ------------------------------------------------------------
 enum MenuScreen {
@@ -88,6 +107,7 @@ static uint32_t g_menuLastHash = 0xFFFFFFFF;
 static bool g_menuForceRedraw = true;
 static uint32_t g_menuLastWeightDraw = 0;
 static String g_menuLastWeightStr = "";   // last drawn weight string (skip redundant pushes)
+static uint16_t g_menuLastWeightCol = 0;  // and its color -- see menuCenterTick
 static String g_menuLastNfcDebugStr = "";  // last drawn NFC-debug-screen content (skip redundant redraws)
 static uint32_t g_menuTaredUntil = 0;     // millis() when MENU_TARED auto-returns to MENU_FLOW
 static bool g_menuNfcWriteWasActive = false;  // tracks the NFC-write lock screen (see menuTick)
@@ -293,18 +313,74 @@ static void menuFooter() {
   x = menuStatusChip(x, y, "WiFi",  wf);
 }
 
+// --- Idle warning band ----------------------------------------------------------
+// Which warning is showing, and in which blink phase it was last painted. -1 forces a
+// repaint (used after a full redraw cleared the screen underneath).
+static int8_t g_menuLastWarnPhase = -1;
+static const char *g_menuLastWarnText = nullptr;
+
+// The warning the idle screen should show, or nullptr. One slot, so the two are ranked:
+// an unverified zero point wins over the calibration nudge because it blocks weighing
+// right now, and without this line the block has no explanation anywhere on the device.
+// Both strings are kept short enough to fit 240 px in font 4 -- measured against
+// TFT_eSPI's widtbl_f32, not estimated: "Zero point unverified" is 233 px and would be
+// clipped, while "Zero unverified" is 170 px. The detail line underneath carries what
+// the shortened headline drops.
+static const char *menuIdleWarnText() {
+  if (!scaleZeroTrusted())                            return "Zero unverified";
+  if (g_calFactor == DEFAULT_CALIBRATION_FACTOR)      return "Calibrate scale";
+  return nullptr;
+}
+
+// Paints the warning band above the footer. Two lines: the condition in font 4 (roughly
+// twice the height of the old font-2 line) and the remedy in font 2 underneath, which
+// keeps the big line short enough to fit 240 px without shrinking it again.
+//
+// Only the big line blinks. A blinking instruction is harder to read than a static one,
+// and the point of the blink is to catch the eye, not to make the fix hard to follow.
+// Blinking is done by drawing in the background color rather than clearing the rect:
+// the band sits directly above the footer chips, and a fillRect wide enough for the text
+// would eat into them on every off phase.
+static void menuWarnTick() {
+  const char *warn = menuIdleWarnText();
+  int8_t phase = warn ? (menuWarnBlinkOn() ? 1 : 0) : 0;
+  // Nothing to do unless the phase or the message changed -- this runs at 5 Hz.
+  if (warn == g_menuLastWarnText && phase == g_menuLastWarnPhase) return;
+  bool cleared = (warn != g_menuLastWarnText) || g_menuLastWarnPhase < 0;
+  g_menuLastWarnText = warn;
+  g_menuLastWarnPhase = phase;
+  // Geometry, checked against the footer: the chips start at height()-20 (= 300 on the
+  // 320 px panel). The big line is 26 px tall around wy, the remedy line 16 px around sy,
+  // so the band spans 249..294 and the wipe below has to cover exactly that.
+  const int wy = g_tft.height() - 58;   // 262: big line, 249..275
+  const int sy = g_tft.height() - 34;   // 286: remedy line, 278..294
+  // Message changed (or the screen was just redrawn): wipe the whole band once, so a
+  // previous, longer warning cannot leave fragments behind.
+  if (cleared) g_tft.fillRect(0, wy - 14, g_tft.width(), 48, MENU_BG);
+  if (!warn) return;
+  g_tft.setTextDatum(MC_DATUM);
+  g_tft.setTextColor(phase ? MENU_WARN_FG : MENU_BG, MENU_BG);
+  g_tft.drawString(warn, g_tft.width() / 2, wy, 4);
+  if (cleared) {   // static, so it only needs painting when the band was wiped
+    g_tft.setTextColor(MENU_DIM, MENU_BG);
+    // Carries what the shortened headline drops: what is unverified, and the way out.
+    g_tft.drawString(scaleZeroTrusted() ? "no factor set - use the web UI"
+                                        : "zero point - clear scale, then Tare",
+                     g_tft.width() / 2, sy, 2);
+  }
+  g_tft.setTextDatum(TL_DATUM);
+}
+
 // Idle: title + status footer. Center area shows either weight (normal) or, when NFC
 // debug is on, the detected tag type/UID (filled by menuCenterTick()).
 static void menuRenderIdle() {
   g_tft.fillRect(0, 0, g_tft.width(), g_tft.height(), MENU_BG);
   menuTitle(g_nfcDebug ? "NFC Debug" : "OctoScale");
-  // Still on the factory default factor -> nudge toward the web UI calibration wizard.
-  if (g_calFactor == DEFAULT_CALIBRATION_FACTOR) {
-    g_tft.setTextColor(MENU_WARN, MENU_BG);
-    g_tft.setTextDatum(MC_DATUM);
-    g_tft.drawString("Calibrate scale in web UI", g_tft.width() / 2, g_tft.height() - 38, 2);
-    g_tft.setTextDatum(TL_DATUM);
-  }
+  // The warning itself is painted by menuWarnTick() so it can blink; drawing it here as
+  // well would fight that (a full redraw lands at an arbitrary point in the blink phase
+  // and would leave the text stuck in whichever state it caught). Reset the cache so the
+  // tick repaints onto the freshly cleared background.
+  g_menuLastWarnPhase = -1;
   menuFooter();
 }
 
@@ -395,12 +471,22 @@ static void menuCenterTick() {
     if (!sprMade) { spr.setColorDepth(16); spr.createSprite(SW, SH); sprMade = true; }
     // Only rebuild + push when the DISPLAYED value actually changes -> no needless
     // 5 Hz refreshes from HX711 noise in the last digit (the main flicker source).
+    // While the zero point is unverified the reading is not a weight anybody should act
+    // on -- it is a number measured against a reference the firmware could not confirm.
+    // Showing it in the accent color like any good reading would assert exactly the
+    // confidence that is missing, so it takes the warning color instead.
+    uint16_t wcol = scaleZeroTrusted() ? MENU_WEIGHT : MENU_WARN_FG;
     String ws = String(g_weight, 1) + " g";
-    if (ws != g_menuLastWeightStr) {
+    // The color has to be part of the cache key. The sprite is only rebuilt when the
+    // DISPLAYED STRING changes, so a zero-point state that flips while the reading sits
+    // still -- the exact case here, since the load is not moving -- would otherwise keep
+    // the old color until the next digit change.
+    if (ws != g_menuLastWeightStr || wcol != g_menuLastWeightCol) {
       g_menuLastWeightStr = ws;
+      g_menuLastWeightCol = wcol;
       spr.fillSprite(MENU_BG);
       spr.loadFont(OctoFontBig);
-      spr.setTextColor(MENU_WEIGHT, MENU_BG);
+      spr.setTextColor(wcol, MENU_BG);
       spr.setTextDatum(MC_DATUM);
       spr.drawString(ws, SW / 2, SH / 2);
       spr.unloadFont();
@@ -603,12 +689,31 @@ static void menuRenderAskTool() {
 static void menuRenderWeighConfirm() {
   g_tft.fillRect(0, 0, g_tft.width(), g_tft.height(), MENU_BG);
   menuTitle("Put on scale");
-  g_tft.setTextColor(MENU_DIM, MENU_BG);
   g_tft.setTextDatum(MC_DATUM);
+  // This is the screen the bad value would be confirmed on, so the zero-point state has
+  // to be visible here and nowhere else would do. Saving is refused while it is unverified
+  // (flowDoWeighSave), so offering "PUSH = save" would be a lie.
+  if (!scaleZeroTrusted()) {
+    // Font 4 and the theme-aware warning color, same as the idle band -- this is the
+    // screen the bad value would have been confirmed on, so it is the last place that
+    // should whisper. It does not blink here: this screen is only reached deliberately
+    // and is read once, where the idle screen has to catch a passing glance.
+    g_tft.setTextColor(MENU_WARN_FG, MENU_BG);
+    g_tft.drawString("Zero unverified", g_tft.width() / 2, 146, 4);
+    g_tft.setTextColor(MENU_DIM, MENU_BG);
+    g_tft.drawString("weight not saved", g_tft.width() / 2, 172, 2);
+    g_tft.setTextDatum(TL_DATUM);
+    menuHint("Tare first   KO = cancel", MENU_SEL_BG);
+    return;
+  }
+  g_tft.setTextColor(MENU_DIM, MENU_BG);
   float rest = g_weight - g_flowSpoolWeight;
-  if (rest < 0) rest = 0;
   if (rest > g_flowTotalWeight) rest = g_flowTotalWeight;
-  g_tft.drawString(String("Remaining ~ ") + String(rest, 0) + " / " + String(g_flowTotalWeight, 0) + " g",
+  // A negative remainder means the reading is below the empty-spool weight. Drawing it as
+  // "0" would present a broken measurement as a legitimately empty spool -- the same
+  // masking that hid the zero-point problem in the first place.
+  String restStr = (rest < 0) ? String("?") : String(rest, 0);
+  g_tft.drawString(String("Remaining ~ ") + restStr + " / " + String(g_flowTotalWeight, 0) + " g",
                    g_tft.width() / 2, 150, 2);
   g_tft.setTextDatum(TL_DATUM);
   menuHint("PUSH = save   KO = cancel", MENU_SEL_BG);
@@ -634,6 +739,9 @@ static uint32_t menuStateHash() {
              + (uint32_t)g_octoCount * 101 + (uint32_t)(g_nfcDebug ? 1 : 0) * 3
              // status markers so the footer redraws when they change
              + (uint32_t)(pn5180IsReady() ? 1 : 0) * 5 + (uint32_t)(g_scaleReady ? 1 : 0) * 23
+             // Without this the idle zero-point warning would never repaint when the
+             // state changes -- it looks exactly like "the warning doesn't work".
+             + (uint32_t)g_scaleZeroState * 167
              + (uint32_t)(g_dbReachable + 2) * 37 + (uint32_t)(WiFi.isConnected() ? 1 : 0) * 41
              + (uint32_t)(g_menuDark ? 1 : 0) * 53 + (uint32_t)(g_pn5180Present ? 1 : 0) * 59;
   return h;
@@ -674,7 +782,11 @@ static void menuRenderSysinfo() {
                  WiFi.isConnected() ? MENU_OK : MENU_ERR);
   y = menuSysRow(y, "IP", (WiFi.isConnected() ? WiFi.localIP().toString() : String("--")).c_str(), MENU_TITLE);
   y = menuSysRow(y, "NFC", pn5180IsReady() ? "ready" : "--", pn5180IsReady() ? MENU_OK : MENU_ERR);
-  y = menuSysRow(y, "Scale", g_scaleReady ? "ready" : "--", g_scaleReady ? MENU_OK : MENU_ERR);
+  // Three-way, not two: a scale that reads fine but whose zero point isn't backed up is
+  // neither "ready" nor broken, and reporting it as ready is how the bad value got saved.
+  y = menuSysRow(y, "Scale",
+                 !g_scaleReady ? "--" : (scaleZeroTrusted() ? "ready" : "zero?"),
+                 !g_scaleReady ? MENU_ERR : (scaleZeroTrusted() ? MENU_OK : MENU_WARN_FG));
   y = menuSysRow(y, "DB", g_dbReachable == 1 ? "connected" : (g_dbReachable == 0 ? "offline" : "?"),
                  g_dbReachable == 1 ? MENU_OK : (g_dbReachable == 0 ? MENU_ERR : MENU_DIM));
   y = menuSysRow(y, "Printers", String(g_octoCount).c_str(), MENU_TITLE);
@@ -2301,6 +2413,7 @@ inline void menuTick(long delta, bool push, bool start) {
       menuRedraw();
       g_menuLastWeightDraw = 0;       // redraw center immediately
       g_menuLastWeightStr = "";       // force weight sprite to repaint after a full redraw
+      g_menuLastWarnPhase = -1;       // and the warning band, onto the cleared background
     }
     g_menuForceRedraw = false;
     g_menuLastHash = hash;
@@ -2308,6 +2421,10 @@ inline void menuTick(long delta, bool push, bool start) {
   // live center area (weight, or tag type in NFC-debug) over the static layout
   if (g_menuScreen == MENU_FLOW && (g_flowState == FLOW_IDLE || g_flowState == FLOW_WEIGH_CONFIRM))
     menuCenterTick();
+  // Blinking idle warning. Only on the idle screen: the other screens either have no
+  // room for it or say it themselves (weigh-confirm draws its own warning line).
+  if (g_menuScreen == MENU_FLOW && g_flowState == FLOW_IDLE && !g_nfcDebug)
+    menuWarnTick();
   // Test menu: NFC/scale live values change on their own, independent of any input --
   // redraw-if-changed every tick while their screen is showing, same idea as above.
   if (g_menuScreen == MENU_TEST_NFC)   menuTestNfcTick();

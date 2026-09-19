@@ -7,6 +7,7 @@ NFC filament scale for OctoPrint and SpoolManagerExtended. This page summarizes 
 - HX711 and 5 kg load cell with live readout on the TFT and web UI.
 - One-point quick calibration and two-point linearity-checked calibration.
 - Calibration factor stored in NVS and retained across reboots and OTA updates.
+- Zero point stored in NVS and checked against a fresh reading at every boot, so a restart while a spool sits on the scale cannot silently adopt that spool's weight as zero. An unconfirmed zero point is shown on the TFT and in the web UI and blocks saving a weight until the scale is tared. Requires a calibrated device.
 
 ## NFC
 

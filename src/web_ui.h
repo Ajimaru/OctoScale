@@ -24,14 +24,14 @@ static const char INDEX_HTML[] PROGMEM =
     // bg, amber accent). ok/warn/bad map to MENU_OK/MENU_WARN/MENU_ERR (theme-fixed).
     ":root{--bg:#ffffff;--surface:#f7f7f7;--surface2:#efefef;--line:#c5c2c5;"
     "--ink:#202420;--muted:#626562;--accent:#00beff;--accent-ink:#00232a;"
-    "--ok:#20ca41;--warn:#c56100;--bad:#ee1c20}"
+    "--ok:#20ca41;--warn:#c56100;--bad:#ee1c20;--warn-fg:#bd2c00}"
     "@media(prefers-color-scheme:dark){:root:not([data-theme='light']){"
     "--bg:#000000;--surface:#161616;--surface2:#1f1f1f;--line:#393839;"
     "--ink:#e6e2e6;--muted:#acaeac;--accent:#ffa500;--accent-ink:#2a1800;"
-    "--ok:#20ca41;--warn:#c56100;--bad:#ee1c20}}"
+    "--ok:#20ca41;--warn:#c56100;--bad:#ee1c20;--warn-fg:#ff5910}}"
     ":root[data-theme='dark']{--bg:#000000;--surface:#161616;--surface2:#1f1f1f;"
     "--line:#393839;--ink:#e6e2e6;--muted:#acaeac;--accent:#ffa500;"
-    "--accent-ink:#2a1800;--ok:#20ca41;--warn:#c56100;--bad:#ee1c20}"
+    "--accent-ink:#2a1800;--ok:#20ca41;--warn:#c56100;--bad:#ee1c20;--warn-fg:#ff5910}"
     // --- OctoPrint skin ------------------------------------------------------
     // Second theme ("OctoPrint"): makes the web UI look like OctoPrint's own
     // Bootstrap-2 interface instead of the OctoScale/TFT palette. Selected via
@@ -45,16 +45,16 @@ static const char INDEX_HTML[] PROGMEM =
     // at a smaller type size with tighter rows than the OctoScale skin.
     ":root[data-skin='octoprint']{--bg:#ffffff;--surface:#ffffff;--surface2:#f5f5f5;"
     "--line:#e5e5e5;--ink:#333333;--muted:#888888;--accent:#337ab7;--accent-ink:#ffffff;"
-    "--ok:#5cb85c;--warn:#f0ad4e;--bad:#d9534f;"
+    "--ok:#5cb85c;--warn:#f0ad4e;--bad:#d9534f;--warn-fg:#c7431a;"
     "--op-btn-top:#f5f5f5;--op-btn-bot:#e6e6e6;--op-btn-line:#cccccc}"
     "@media(prefers-color-scheme:dark){:root[data-skin='octoprint']:not([data-theme='light']){"
     "--bg:#1d2124;--surface:#25292d;--surface2:#2d3237;--line:#3a4046;"
     "--ink:#e2e5e8;--muted:#9198a0;--accent:#5aa9e0;--accent-ink:#ffffff;"
-    "--ok:#5cb85c;--warn:#f0ad4e;--bad:#e05c58;"
+    "--ok:#5cb85c;--warn:#f0ad4e;--bad:#e05c58;--warn-fg:#ff7a45;"
     "--op-btn-top:#31363b;--op-btn-bot:#282c31;--op-btn-line:#454b52}}"
     ":root[data-skin='octoprint'][data-theme='dark']{--bg:#1d2124;--surface:#25292d;"
     "--surface2:#2d3237;--line:#3a4046;--ink:#e2e5e8;--muted:#9198a0;--accent:#5aa9e0;"
-    "--accent-ink:#ffffff;--ok:#5cb85c;--warn:#f0ad4e;--bad:#e05c58;"
+    "--accent-ink:#ffffff;--ok:#5cb85c;--warn:#f0ad4e;--bad:#e05c58;--warn-fg:#ff7a45;"
     "--op-btn-top:#31363b;--op-btn-bot:#282c31;--op-btn-line:#454b52}"
     ":root[data-skin='octoprint'] body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"
     "font-size:13px;line-height:1.42857}"
@@ -191,6 +191,13 @@ static const char INDEX_HTML[] PROGMEM =
     ".ti{width:14px;height:14px;margin-right:6px}"
     "nav button{display:inline-flex;align-items:center}"
     ".big{font-size:38px;font-weight:600;line-height:1}.big small{font-size:16px;color:var(--muted);font-weight:500}"
+    ".warnstate .big{color:var(--warn-fg)}"
+    ".zwarn{margin:10px 0 0;padding:9px 11px;border-radius:6px;font-size:13px;line-height:1.35;"
+    "color:var(--warn-fg);border:1px solid var(--warn-fg);"
+    "background:color-mix(in srgb,var(--warn-fg) 12%,transparent);"
+    "animation:zblink 1.4s steps(1,end) infinite}"
+    "@keyframes zblink{0%,50%{opacity:1}50.01%,100%{opacity:.45}}"
+    "@media(prefers-reduced-motion:reduce){.zwarn{animation:none}}"
     // rows (key/value)
     ".row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--line);font-size:14px}"
     ".row:last-child{border-bottom:0}.row .k{color:var(--muted)}.row .v{text-align:right}"
@@ -340,8 +347,9 @@ static const char INDEX_HTML[] PROGMEM =
     "<button id='fcancel' class='ghost' style='display:none' onclick='fcancel()'>Cancel</button>"
     "</div>"
     // Weight
-    "<div class='card'><h2><svg class='ci'><use href='#i-weight'/></svg>Weight</h2>"
+    "<div class='card' id='wcard'><h2><svg class='ci'><use href='#i-weight'/></svg>Weight</h2>"
     "<div class='big mono'><span id='w'>--</span><small> g</small></div>"
+    "<div id='wwarn' class='zwarn' style='display:none'></div>"
     "<form onsubmit=\"fetch('/tare');return false\"><button type='submit' class='ghost'>Tare</button></form></div>"
     // Short status / hint
     "<div class='card'><h2><svg class='ci'><use href='#i-info'/></svg>Hint</h2>"
@@ -509,6 +517,9 @@ static const char INDEX_HTML[] PROGMEM =
     "<div class='row'><span class='k'>Tare offset</span><span class='v mono' id='scoff'>--</span></div>"
     "<div class='row'><span class='k'>Scale factor</span><span class='v mono' id='scfac'>--</span></div>"
     "<div class='row'><span class='k'>Noise (std dev)</span><span class='v mono' id='scnoise'>--</span></div>"
+    "<div class='row'><span class='k'>Zero point</span><span class='v' id='sczero'>--</span></div>"
+    "<div class='row'><span class='k'>Zero deviation</span><span class='v mono' id='sczdelta'>--</span></div>"
+    "<div id='sczmsg' class='note' style='display:none'></div>"
     "</div>"
     "</div></section>"
 
@@ -1076,7 +1087,12 @@ static const char INDEX_HTML[] PROGMEM =
     "if(lastState==='idle'&&o.state!=='idle')gotoTab('betrieb');"
     "lastState=o.state;fRender(o);});}"
     "function fact(e,w){busy(e,fetch('/flow/action?do='+w).then(r=>r.json()).then(fRender));}"
-    "function fweigh(e){busy(e,fetch('/flow/weigh').then(r=>r.json()).then(fRender));}"
+    // /flow/weigh answers 409 + plain text when the zero point isn't verified. Passing
+    // that straight into r.json() would throw and leave the user with a button that did
+    // nothing visible -- the refusal has to be readable, it names what to do about it.
+    "function fweigh(e){busy(e,fetch('/flow/weigh').then(function(r){"
+    "if(!r.ok)return r.text().then(function(t){alert(t);});"
+    "return r.json().then(fRender);}));}"
     "function frw(e){busy(e,fetch('/flow/reweigh').then(r=>r.json()).then(fRender));}"
     "function fpr(e,i){busy(e,fetch('/flow/printer?idx='+i).then(r=>r.json()).then(fRender));}"
     "function ftool(e,n){busy(e,fetch('/flow/tool?n='+n).then(r=>r.json()).then(fRender));}"
@@ -1213,8 +1229,9 @@ static const char INDEX_HTML[] PROGMEM =
     "document.getElementById('dgnfcuid').textContent=o.present?o.uid:'--';});"
     "fetch('/scaleinfo').then(r=>r.json()).then(function(o){"
     "document.getElementById('dgscaleready').textContent=o.ready?'ready':'not ready';});"
+    // /weight answers "<grams>|<state>|<deviation>" -- this panel only wants the number.
     "fetch('/weight').then(r=>r.text()).then(function(t){"
-    "document.getElementById('dgweight').textContent=t+' g';});"
+    "document.getElementById('dgweight').textContent=t.split('|')[0]+' g';});"
     "if(!document.hidden&&currentTab==='debug')dgTimer=setTimeout(dgpoll,1000);}"
     // Auto-cycle: a plain client-side setInterval calling the existing ?next=1 step
     // endpoint -- no new firmware endpoint needed, this just automates the same knob
@@ -1478,8 +1495,26 @@ static const char INDEX_HTML[] PROGMEM =
     "else if(id==='setup'){wifiupd();}"
     "else if(id==='system'){sysupd();wifiupd();}"
     "else if(id==='debug'){ndbg();dbgload();mpvpoll();dgpoll();}}"
-    "function wpoll(){fetch('/weight').then(r=>r.text())"
-    ".then(t=>document.getElementById('w').textContent=t);}"
+    // Mirrors the TFT idle screen: the number takes the warning color while the zero
+    // point is unconfirmed, and a banner underneath says what is wrong and what to do.
+    // Same reasoning as on the display -- showing an unverified reading in the normal
+    // accent asserts a confidence that is not there. The banner blinks on the same
+    // 700 ms cadence as the TFT so both surfaces pulse together where a user can see
+    // them side by side; CSS animation, so it costs nothing per poll.
+    "function wpoll(){fetch('/weight').then(r=>r.text()).then(function(t){"
+    "var p=t.split('|'),st=p[1]||'',dev=p[2]||'0';"
+    "document.getElementById('w').textContent=p[0];"
+    "var bad=(st==='suspect'||st==='unstable');"
+    "var wc=document.getElementById('wcard');"
+    "if(wc)wc.classList.toggle('warnstate',bad);"
+    "var wb=document.getElementById('wwarn');"
+    "if(!wb)return;"
+    "if(!bad){wb.style.display='none';return;}"
+    "wb.style.display='';"
+    "wb.textContent=(st==='unstable')"
+    "?'Zero unverified \\u2013 the reading was too restless at boot to confirm it. Clear the scale and press Tare.'"
+    ":'Zero unverified \\u2013 reading deviates by '+dev+' g from the stored zero point. Clear the scale and press Tare. Saving a weight is blocked until then.';"
+    "});}"
     // ---- HX711 diagnostics (Scale tab) ----
     "function scpoll(){fetch('/scaleinfo').then(r=>r.json()).then(s=>{"
     "var rd=document.getElementById('scready');"
@@ -1491,6 +1526,22 @@ static const char INDEX_HTML[] PROGMEM =
     "document.getElementById('scfac').textContent=Number(s.scaleFactor).toFixed(4);"
     "document.getElementById('scnoise').textContent=s.noiseStdDev===null?'--- (warming up)':"
     "(Number(s.noiseStdDev).toFixed(1)+' counts ('+s.noiseSamples+' samples)');"
+    // Zero point. The text states the observation and the way out, never a cause -- the
+    // firmware cannot tell a load on the scale from cell drift or a rebuilt mechanism,
+    // and claiming one would be documenting a guess as a fact.
+    "var zs=document.getElementById('sczero');"
+    "zs.textContent=s.zeroState;"
+    "zs.style.color=s.zeroTrusted?'var(--ok)':'var(--warn)';"
+    "document.getElementById('sczdelta').textContent="
+    "Number(s.zeroDeltaGrams).toFixed(1)+' g ('+s.zeroDeltaCounts+' counts)';"
+    "var zm=document.getElementById('sczmsg');"
+    "if(s.zeroTrusted){zm.style.display='none';}else{zm.style.display='';"
+    "zm.textContent=s.zeroState==='unstable'"
+    "?'Unverified - the reading was too restless at boot to confirm the zero point. "
+    "Tare the scale to confirm it.'"
+    ":'Unverified - reading deviates by '+Number(s.zeroDeltaGrams).toFixed(0)+"
+    "' g from the stored zero point. Tare the empty scale to confirm. "
+    "Saving a weight is blocked until then.';}"
     "});}"
     "setInterval(pv(wpoll,'betrieb'),500);"
     "setInterval(pv(upN,'nfc'),700);setInterval(pv(fpoll,'betrieb'),800);"

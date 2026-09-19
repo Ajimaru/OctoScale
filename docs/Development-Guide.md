@@ -205,6 +205,8 @@ The WebUI is embedded in `src/web_ui.h`. Periodic status requests are owned by t
 | Debug | `/nfcdebug` | 700 ms |
 | Debug diagnostics | `/nfc5180`, `/scaleinfo`, `/weight` | 1000 ms |
 
+`/weight` answers `<grams>|<zeroState>|<deviation g>` as plain text rather than a bare number. The zero-point verdict rides along on that poll instead of being fetched separately so the Operate tab's reading and its warning can never disagree on screen; a consumer that only wants the weight takes the first field.
+
 The Debug tab has two additional conditional loops. The menu preview polls `/menupreview` every 300 ms only while the preview is active. The debug console polls `/debuglog` every 500 ms only while debug logging is enabled. These loops stop when the Debug tab is left or the browser page is hidden.
 
 The header status LEDs are the one deliberate exception to tab ownership: they poll `/system` and `/wifi/status` every 10 s regardless of the active tab, because they are visible from all of them. They are still gated on page visibility, and the visibility handler refreshes them on return so they do not show stale state.
@@ -227,13 +229,29 @@ Tag removal keeps action/printer/tool selection open for the configured timeout.
 
 ## Persistent configuration and backup
 
-Preferences are stored under the `octoscale` namespace. Important keys include the calibration factor, OctoPrint instance JSON, selected database instance, selection timeout, display brightness/timeouts, screensaver settings, buzzer settings, and debug-console enablement. WiFiManager stores WiFi credentials separately.
+Preferences are stored under the `octoscale` namespace. Important keys include the calibration factor, the tare offset and the factor it was written under, OctoPrint instance JSON, selected database instance, selection timeout, display brightness/timeouts, screensaver settings, buzzer settings, and debug-console enablement. WiFiManager stores WiFi credentials separately.
 
 Configuration backup is JSON. API keys are encrypted only when a passphrase is supplied, using PBKDF2-HMAC-SHA256 and AES-256-CBC with a random salt and IV. Without a passphrase, keys are omitted rather than exported in plaintext. Restore validates and decrypts the complete file before writing anything to NVS, so a bad password must leave the running configuration unchanged. The backup protects the file, not an unencrypted LAN transport.
 
 Device settings travel in a `settings` object addressed by NVS key, driven by the `BK_SETTINGS` table in `backup.h`. Adding a setting means adding one row there; export and import both walk the same table, so they cannot drift apart. Each row records the width the value is written with, because Preferences returns 0 when a `uint8` key is read back as `uint16`. Export skips keys that were never written, and import skips keys the file does not contain — an old backup therefore leaves newer settings at the running firmware's defaults instead of resetting them, which is also why the format version stays at 1. The table goes through NVS rather than the matching globals because `g_menuDark` is file-static in `menu.h`, included long after `backup.h`.
 
 `bkImport` only writes NVS. The `/restore` handler re-reads those keys into the globals afterwards and re-applies the theme and LED routing, since the running firmware holds them in RAM; without that, a restore appears to have been ignored until the next boot.
+
+## Zero point and tare
+
+The tare offset is persisted (`tareOff`), together with the calibration factor that was in effect when it was written (`tareOffFac`). Both are needed: an offset in ADC counts cannot be read as grams without its factor, so after a recalibration a gram threshold computed from the new factor against an offset written under the old one would be wrong. `applyCalFactor` therefore carries `tareOffFac` forward — without that line the stored offset would count as stale after every calibration.
+
+`startScale` no longer tares unconditionally. It calls `scaleZeroEvaluate`, which reads a short quiet window and compares its mean against the stored offset. Within tolerance the offset is refreshed from the fresh reading, which keeps temperature drift from accumulating. Outside tolerance the stored offset wins and nothing is written — the scale then displays the load that is actually on it instead of zero.
+
+The four states are reported as `zeroState` in `/scaleinfo`, with `zeroTrusted` as the field to branch on. `suspect` deliberately claims only that the reading deviates, never why: a single measurement cannot separate a load on the platform from cell drift or a rebuilt mechanism, so the firmware reports the observation and leaves the cause open. `unstable` means the boot window was too noisy to support any statement at all.
+
+`scaleTask` also flips a trusted zero to `suspect` when the reading drops well below zero at runtime. That is the one case no boot check can see: boot with a load, load removed afterwards. The negative reading is still clamped for display, but the state is set before the clamp — the clamp used to destroy exactly this information.
+
+Weighing is refused while the zero point is not trusted, at both entry points and again inside `flowDoWeighSave`, because that path writes to the database and then onto the tag, and neither has a way back. A manual tare is the only way out of `suspect` and `unstable`; it deliberately performs no empty check, since a permanently mounted holder legitimately belongs to the zero point and the firmware cannot tell it apart from a spool left on by accident.
+
+Both surfaces report the same thing the same way: the reading takes the warning color and a line underneath names the deviation and the remedy, on the TFT idle screen and in the Operate tab's weight card. The warning color is per theme in both (`MENU_WARN_FG` on the display, `--warn-fg` in CSS) because one amber cannot serve both backgrounds — the tone that stands out on black washes out on white. It is deliberately not the error red, which means "broken" on the footer chips, whereas an unconfirmed zero point is not a fault.
+
+Thresholds live in grams (`SCALE_ZERO_TOL_G`) and convert to counts at runtime, with a floor so they never fall under the cell's own noise. On an uncalibrated device the factor is the 1.0 placeholder, grams are meaningless, and the stored offset is treated as not comparable — the guard is inactive until the device is calibrated.
 
 ## WiFi and OctoPrint integration
 
