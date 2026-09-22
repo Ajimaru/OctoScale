@@ -39,7 +39,9 @@ Every local build appends a running number to the version it reports — `0.0.3-
 
 `tools/dev_build.py` runs as a pre-script for both environments. It increments a counter, passes the result in as `FW_DEV_BUILD`, and after linking writes `artifacts/octoscale-<version>-<env>.bin`, the identical `-ota.bin`, and the matching `.elf`. Keep the `.elf`: a backtrace from the serial monitor cannot be resolved once the build it came from has been overwritten.
 
-The counter lives in `artifacts/.devcounter`, outside version control by way of `artifacts/` already being ignored. A number that changes on every build would otherwise make every test flash look like a source change. `src/version.h` keeps the release number in `FW_VERSION_RELEASE` and falls back to it when `FW_DEV_BUILD` is absent, so a clean checkout, a CI build or a release build reports a plain version with no dev suffix. Rename one of those macros and the script's pattern has to follow, or the version silently reads as `0.0.0`.
+The counter lives in `artifacts/.devcounter`, outside version control by way of `artifacts/` already being ignored. A number that changes on every build would otherwise make every test flash look like a source change. `src/version.h` keeps the release number in `FW_VERSION_RELEASE` and falls back to it when `FW_DEV_BUILD` is absent, so a clean checkout reports a plain version with no dev suffix. Rename one of those macros and the script's pattern has to follow, or the version silently reads as `0.0.0`.
+
+`tools/dev_build.py` runs as a pre-script for *every* build via the shared `s3_base` environment, including CI — a release build is not naturally exempt. The release workflow (`.github/workflows/release.yml`) sets `OCTOSCALE_RELEASE_BUILD=1` before invoking `pio run`; the script checks that flag and, when set, skips both the dev suffix and the `artifacts/` archiving, so the published firmware reports the plain `FW_VERSION_RELEASE` instead of `<version>-dev<N>`.
 
 Check what actually shipped by reading the binary rather than the build log, which only shows what the script intended:
 
