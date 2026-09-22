@@ -9,8 +9,10 @@
 // tools/dev_build.py defines FW_DEV_BUILD on every local build and keeps the counter
 // in artifacts/.devcounter, outside git: the number changes on every build, so having
 // it in a tracked file would make every test flash look like a source change.
-// A build without that script (a clean checkout, CI, a release build) falls back to
-// the plain release version, which is what a published firmware should report.
+// A build without that script (a clean checkout) falls back to the plain release
+// version. CI's release build runs the same script but with OCTOSCALE_RELEASE_BUILD=1
+// (see .github/workflows/release.yml and tools/dev_build.py), which makes it skip the
+// dev suffix so a published firmware reports the plain release version too.
 #ifdef FW_DEV_BUILD
   #define FW_VERSION FW_DEV_BUILD
 #else

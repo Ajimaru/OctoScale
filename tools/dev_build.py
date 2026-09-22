@@ -18,10 +18,16 @@ build would otherwise turn every test flash into a commit-worthy change.
 
 Both the USB and the OTA environment run this. They share s3_base, so the same source
 builds both, and the artifact names carry the environment to keep them apart.
+
+The release workflow (.github/workflows/release.yml) sets OCTOSCALE_RELEASE_BUILD=1
+before invoking pio: this script is still `pre:`-registered for every build via
+s3_base, so without that opt-out a release build would silently get a -devN suffix
+and archived artifacts it doesn't need.
 """
 
 Import("env")
 
+import os
 import re
 import shutil
 from pathlib import Path
@@ -30,6 +36,7 @@ PROJECT_DIR = Path(env["PROJECT_DIR"])
 ARTIFACT_DIR = PROJECT_DIR / "artifacts"
 COUNTER_FILE = ARTIFACT_DIR / ".devcounter"
 VERSION_HEADER = PROJECT_DIR / "src" / "version.h"
+IS_RELEASE_BUILD = os.environ.get("OCTOSCALE_RELEASE_BUILD") == "1"
 
 
 def read_release_version() -> str:
@@ -66,44 +73,46 @@ def next_dev_number() -> int:
     return nxt
 
 
-RELEASE_VERSION = read_release_version()
-DEV_NUMBER = next_dev_number()
-DEV_VERSION = f"{RELEASE_VERSION}-dev{DEV_NUMBER}"
+if IS_RELEASE_BUILD:
+    print("dev_build: OCTOSCALE_RELEASE_BUILD=1, skipping dev suffix and archiving")
+else:
+    RELEASE_VERSION = read_release_version()
+    DEV_NUMBER = next_dev_number()
+    DEV_VERSION = f"{RELEASE_VERSION}-dev{DEV_NUMBER}"
 
-# The firmware reads this instead of FW_VERSION when it is defined (see version.h).
-# Quoting via CPPDEFINES tuple so the value reaches the compiler as a string literal.
-env.Append(CPPDEFINES=[("FW_DEV_BUILD", env.StringifyMacro(DEV_VERSION))])
+    # The firmware reads this instead of FW_VERSION when it is defined (see version.h).
+    # Quoting via CPPDEFINES tuple so the value reaches the compiler as a string literal.
+    env.Append(CPPDEFINES=[("FW_DEV_BUILD", env.StringifyMacro(DEV_VERSION))])
 
-print(f"dev_build: building {DEV_VERSION}")
+    print(f"dev_build: building {DEV_VERSION}")
 
+    def archive_artifacts(source, target, env):
+        """Copy the linked images into artifacts/ under the dev version name.
 
-def archive_artifacts(source, target, env):
-    """Copy the linked images into artifacts/ under the dev version name.
+        Runs after the .bin exists. firmware.bin is the application image -- the same
+        file the web UI's OTA upload expects (see docs/Setup-Guide.md); it is copied
+        under an -ota name as well so the OTA upload target is obvious without knowing
+        that.
+        """
+        build_dir = Path(env.subst("$BUILD_DIR"))
+        env_name = env.subst("$PIOENV")
+        base = f"octoscale-{DEV_VERSION}-{env_name}"
 
-    Runs after the .bin exists. firmware.bin is the application image -- the same file
-    the web UI's OTA upload expects (see docs/Setup-Guide.md); it is copied under an
-    -ota name as well so the OTA upload target is obvious without knowing that.
-    """
-    build_dir = Path(env.subst("$BUILD_DIR"))
-    env_name = env.subst("$PIOENV")
-    base = f"octoscale-{DEV_VERSION}-{env_name}"
+        ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+        copies = [
+            (build_dir / "firmware.bin", ARTIFACT_DIR / f"{base}.bin"),
+            (build_dir / "firmware.bin", ARTIFACT_DIR / f"{base}-ota.bin"),
+            (build_dir / "firmware.elf", ARTIFACT_DIR / f"{base}.elf"),
+        ]
+        for src, dst in copies:
+            if not src.exists():
+                print(f"dev_build: WARNING {src.name} missing, not archived")
+                continue
+            try:
+                shutil.copy2(src, dst)
+            except OSError as exc:
+                # Never fail the build over archiving -- the firmware itself is fine.
+                print(f"dev_build: WARNING could not archive {dst.name} ({exc})")
+        print(f"dev_build: archived {base}.{{bin,-ota.bin,elf}} -> artifacts/")
 
-    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
-    copies = [
-        (build_dir / "firmware.bin", ARTIFACT_DIR / f"{base}.bin"),
-        (build_dir / "firmware.bin", ARTIFACT_DIR / f"{base}-ota.bin"),
-        (build_dir / "firmware.elf", ARTIFACT_DIR / f"{base}.elf"),
-    ]
-    for src, dst in copies:
-        if not src.exists():
-            print(f"dev_build: WARNING {src.name} missing, not archived")
-            continue
-        try:
-            shutil.copy2(src, dst)
-        except OSError as exc:
-            # Never fail the build over archiving -- the firmware itself is fine.
-            print(f"dev_build: WARNING could not archive {dst.name} ({exc})")
-    print(f"dev_build: archived {base}.{{bin,-ota.bin,elf}} -> artifacts/")
-
-
-env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", archive_artifacts)
+    env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", archive_artifacts)
