@@ -25,7 +25,7 @@ jobs:
       - name: Validate tag version
         shell: bash
         run: |
-          firmware_version="$(sed -n 's/^#define FW_VERSION "\([^"]*\)"/\1/p' src/version.h)"
+          firmware_version="$(sed -n 's/^#define FW_VERSION_RELEASE "\([^"]*\)"/\1/p' src/version.h)"
           tag_version="${GITHUB_REF_NAME#v}"
           [[ "$firmware_version" == "$tag_version" ]] || {
             echo "Tag $GITHUB_REF_NAME does not match FW_VERSION $firmware_version"
