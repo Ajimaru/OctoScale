@@ -137,6 +137,107 @@ static void idleCounterTask(void *arg) {
 float g_calFactor = DEFAULT_CALIBRATION_FACTOR;  // active factor (loaded from NVS)
 bool g_scaleReady = false;
 
+// ---- Zero-point trust -------------------------------------------------------------
+// The tare offset used to be a pure runtime value: every boot re-tared blindly
+// (startScale()) and therefore adopted whatever happened to be sitting on the scale.
+// With a spool on it -- the normal state after a brownout reset, and raiseBrownoutThreshold()
+// below deliberately makes those resets MORE likely so they become diagnosable -- that
+// spool's weight became the new zero. Nothing about that was visible afterwards: scaleTask
+// clamps the resulting negative readings to 0, so the empty scale read a perfectly
+// plausible "0.0 g" and the error only surfaced once it had been written to the database
+// and onto the tag, neither of which has a way back.
+//
+// So: persist the offset AND check it at boot instead of reinventing it.
+//
+// What this state deliberately does NOT claim matters as much as what it does. When the
+// boot reading deviates strongly from the stored offset, a SINGLE measurement cannot
+// distinguish "a load is sitting on it" from "the cell drifted over weeks" from "somebody
+// rebuilt the mechanics". The firmware therefore reports only the observation it can back
+// up ("zero point deviates by X g") and refuses the unprovable conclusion -- it names no
+// cause. Hence ZERO_SUSPECT, not ZERO_LOAD_ON_BOOT.
+enum ScaleZeroState : uint8_t {
+  ZERO_OK = 0,      // boot reading agrees with the stored offset
+  ZERO_UNVERIFIED,  // no comparable offset stored (first boot / factor changed)
+  ZERO_SUSPECT,     // deviation too large -> stored offset kept, NOT re-tared
+  ZERO_UNSTABLE,    // boot reading too restless to support any statement
+};
+// Written by scaleTask (core 0) and startScale(), read by the HTTP handlers (core 1) ->
+// volatile, like the other scale diagnostics. Note that g_scaleZeroState and
+// g_scaleZeroDelta are NOT atomic together: a /scaleinfo poll can catch a state that has
+// just changed next to a delta that has not. That is harmless -- the delta is display
+// only, and the write-guard reads nothing but the state. Please don't "fix" it with a
+// mutex; the cure would cost more than the disease.
+volatile ScaleZeroState g_scaleZeroState = ZERO_UNVERIFIED;
+volatile long  g_scaleZeroDelta = 0;      // boot reading minus stored offset, ADC counts
+volatile long  g_scaleZeroStoredOff = 0;  // the offset that was loaded (0 = none), for /scaleinfo
+volatile float g_scaleZeroNoise = 0.0f;   // std-dev of the boot window, ADC counts
+
+// Thought of in grams and converted to counts at runtime (g_calFactor = counts/gram),
+// because counts are device specific.
+//
+// Lower bound is the scale's own noise: 22-50 counts std-dev measured on the built unit,
+// with the raw value wandering across a ~100-count band (see the derivation of
+// SCALE_STUCK_TOLERANCE below). A threshold underneath that band would trip on every
+// other boot for no reason.
+//
+// Upper bound is what still does no relevant damage: the lightest thing realistically
+// left on the scale is an empty spool at ~150-250 g depending on make. The threshold has
+// to stay well below that -- otherwise exactly the case this guards against slips through.
+//
+// 20 g sits comfortably between the two: far above the noise even with a weak factor, far
+// below any load. Temperature drift of a 5 kg cell runs a few tenths of a percent of
+// nominal across its operating range, which stays well under 20 g over the few degrees a
+// device sees in a room; across weeks and larger swings it can wander there, which is why
+// the OK case nudges the stored offset along (see scaleZeroEvaluate()).
+static const float    SCALE_ZERO_TOL_G = 20.0f;
+// Quiet criterion before an automatic tare. Same unit and same formula as noiseStdDev in
+// /scaleinfo. Deliberately generous (3x the measured resting ceiling of ~50 counts):
+// the only thing to rule out here is "somebody is touching the scale right now", not "this
+// cell is slightly noisier than average" -- too strict a bound would permanently block
+// boots on a poorly decoupled table.
+static const float    SCALE_ZERO_STABLE_MAX_SD = 150.0f;
+static const uint8_t  SCALE_ZERO_STABLE_SAMPLES = 10;    // same window size as /scaleinfo
+static const uint32_t SCALE_ZERO_STABLE_TIMEOUT_MS = 3000;
+
+// Tolerance in ADC counts. At DEFAULT_CALIBRATION_FACTOR (1.0, a neutral placeholder --
+// see above) the device is not calibrated at all: "grams" carries no meaning there and a
+// threshold derived from it would be numerology. Fall back to a plain noise multiple that
+// holds without calibration.
+static long scaleZeroTolCounts() {
+  if (g_calFactor <= 0.0f || g_calFactor == DEFAULT_CALIBRATION_FACTOR) return 500;
+  long t = (long)(SCALE_ZERO_TOL_G * g_calFactor);
+  // Never below the measured resting band (~100 counts) x2: with a small factor (coarse
+  // scale, few counts per gram) 20 g would land underneath the noise -> permanent alarm.
+  if (t < 200) t = 200;
+  return t;
+}
+
+// May a measured weight be written to the database and onto the tag?
+//
+// ZERO_UNVERIFIED is deliberately NOT blocked: that is the first boot of a freshly flashed
+// device, and blocking there would prevent commissioning without covering any known
+// failure -- the user calibrates and tares in that state anyway.
+static bool scaleZeroTrusted() {
+  return g_scaleZeroState == ZERO_OK || g_scaleZeroState == ZERO_UNVERIFIED;
+}
+
+// Zero-state names for the UI (order matches enum ScaleZeroState)
+static const char *scaleZeroStateName(ScaleZeroState s) {
+  switch (s) {
+    case ZERO_OK:         return "ok";
+    case ZERO_UNVERIFIED: return "unverified";
+    case ZERO_SUSPECT:    return "suspect";
+    case ZERO_UNSTABLE:   return "unstable";
+    default:              return "unverified";
+  }
+}
+
+// Deviation in grams, for messages and /scaleinfo. Guards the factor because an
+// uncalibrated device divides by the 1.0 placeholder and would report counts as grams.
+static float scaleZeroDeltaGrams() {
+  return (g_calFactor > 0.0f) ? ((float)g_scaleZeroDelta / g_calFactor) : 0.0f;
+}
+
 // ---- HX711 diagnostics (/scaleinfo) -----------------------------------------------
 // The HX711 itself has no status/health registers (unlike the PN5180) -- it's a bare
 // 24-bit ADC. What's useful to surface instead: the raw (unscaled, untared) reading, so
@@ -406,7 +507,20 @@ static void nfcClassifyTag(PN5180TagType type, uint16_t atqa, uint8_t sak,
     if (isClassic) {
       writeFormatOut = "octoscaleExtended";
       formatLabelOut = "Extended";
-      capacityBytesOut = 16 * 5;  // blocks 4,8,9,12,13,14 minus block 4's own 12 already counted elsewhere -> approx sector capacity
+      // Derived from the octoscaleExtended block layout rather than hard-coded, so it
+      // cannot drift away from the write path again. It reported 16*5 = 80 B, a v1-era
+      // figure that predates the v2/v3 numeric and string blocks -- roughly a quarter
+      // of what is actually written, which made the value useless for deciding whether
+      // a payload fits.
+      // Blocks: 4 (legacy id) + 8,9,10 + 12,13,14 + 16,17 + the 12 string2 blocks
+      // + 36 (commit marker). Sector trailers are not counted -- they hold Crypto1
+      // keys, not payload.
+      capacityBytesOut = PN5180_ID_BYTES          // block 4, legacy id (12 of 16 B used)
+                       + 16 * 3                   // blocks 8,9,10   numeric/magic
+                       + MIFARE_EXT_STRING_BYTES  // blocks 12,13,14 first string buffer
+                       + 16 * 2                   // blocks 16,17    v3 packed numerics
+                       + MIFARE_EXT_STRING2_BYTES // blocks 20-34    second string buffer
+                       + 16;                      // block 36        commit marker
     } else {
       writeFormatOut = "openSpool"; formatLabelOut = "OpenSpool";
       // NTAG213/215/216 differ 6x in user memory (144/504/888 B) and only GET_VERSION
@@ -675,6 +789,18 @@ int g_flowToolCount = 0;      // tool count of the chosen printer (live)
 int g_flowTool = -1;          // chosen tool
 String g_flowMsg = "";        // status/error message for the UI
 volatile bool g_flowDbRequest = false;  // DB-check trigger from pn5180Task
+// UID the current flow belongs to ("" = none). Set on every accepted trigger, cleared
+// in flowReset(). Lets a swap be told apart from a re-trigger of the SAME tag: without
+// it, flowOnTagPresent could only ask "is the flow busy?", and answering yes meant a
+// spool swapped in while the ask_* menu was open was silently dropped -- the poll's
+// g_lastUid latch had already moved on to the new tag, so no later poll re-offered it
+// and both UIs kept showing the previous spool until the menu timed out.
+String g_flowUid = "";
+// Bumped on every accepted trigger. runDbCheck() runs in loop() (core 1) while the poll
+// (core 0) may start a NEW flow in the meantime; the check captures the generation it
+// started with and drops its result if it no longer matches, instead of publishing the
+// old spool's name/weights over the new spool's flow.
+volatile uint32_t g_flowGen = 0;
 // FLOW_UNKNOWN reached with a foreign vendor tag (occupancy=="foreign") rather than a
 // blank/unassigned one -- lets the TFT report it neutrally instead of as an error.
 volatile bool g_flowForeignTag = false;
@@ -682,6 +808,12 @@ volatile bool g_flowEmptyTag = false;    // ... or a verified-blank one (occupan
 // Foreign tag (e.g. Snapmaker): no databaseId payload on the tag, only a UID ->
 // runDbCheck() resolves it via spoolExistsByCode() instead of spoolExists(id).
 bool g_flowLookupByCode = false;
+// Set when a tag carried a legacy-parsed id that was rejected as not credible (foreign
+// occupancy, no format magic -- see flowOnTagPresent). Purely for the message shown:
+// "there IS a number on this tag, we are deliberately not using it" is a different
+// thing to tell the user than "this tag has no number at all", and without saying so
+// the device looks like it simply failed to read a tag the browser shows an id for.
+bool g_flowUntrustedId = false;
 String g_flowLookupUid = "";
 
 // TFT menu delegation: the three blocking flow transitions (flowDoPrinter/Tool/
@@ -939,8 +1071,28 @@ void applyCalFactor(float f) {
   scale.set_scale(g_calFactor);
   prefs.begin("octoscale", false);
   prefs.putFloat("calFactor", g_calFactor);
+  // Carry the stored tare offset's companion factor along. /calibrate and /calibrate2
+  // change only the SLOPE -- the offset stays physically the same point. Without this
+  // line the stored offset would count as "not comparable" after every calibration (see
+  // applyTareOffset) and the device would sit in ZERO_UNVERIFIED for good. Easy to miss,
+  // because testing with a constant factor never shows it.
+  prefs.putFloat("tareOffFac", g_calFactor);
   prefs.end();
   Serial.printf("Calibration factor saved: %.4f\n", g_calFactor);
+}
+
+// Sets the tare offset live AND persists it, together with the factor that was in effect.
+// The factor belongs with it because an offset in ADC counts cannot be interpreted in
+// grams without it -- after a recalibration, any gram threshold computed from the NEW
+// factor against an offset written under the OLD one is simply wrong. If the two don't
+// match, the offset counts as not comparable (see scaleZeroEvaluate()).
+void applyTareOffset(long off) {
+  scale.set_offset(off);
+  g_scaleZeroStoredOff = off;
+  prefs.begin("octoscale", false);
+  prefs.putLong("tareOff", off);
+  prefs.putFloat("tareOffFac", g_calFactor);
+  prefs.end();
 }
 
 
@@ -1020,30 +1172,56 @@ static String flowStatusJson() {
 // Triggered via g_flowDbRequest from pn5180Task.
 static void runDbCheck() {
   g_flowDbRequest = false;
+  // The lookup below blocks for the length of an HTTP round-trip, during which
+  // pn5180Task (core 0) can see a tag swap and start a whole new flow. Everything this
+  // function publishes afterwards would then describe the tag that has just been taken
+  // off. Capture the generation up front and check it again before publishing.
+  uint32_t gen = g_flowGen;
+  long reqSpoolId = g_flowSpoolId;
+  bool reqByCode = g_flowLookupByCode;
+  String reqUid = g_flowLookupUid;
   // spoolExists() blocks (HTTP) -> ledTick() won't run again until it returns, so set
   // the solid "working" color up front instead of only after the fact.
   ledShow(idleColor());
   String name, err;
   bool known;
-  if (g_flowLookupByCode) {
-    dbgLogf("HTTP: GET spool/byCode/%s (instance %u)", g_flowLookupUid.c_str(), g_dbInstance);
+  // Written into locals first, copied onto the globals only once the generation check
+  // below confirms this result still belongs to the tag on the reader.
+  float spoolWeight = -1.0f, totalWeight = -1.0f, remaining = -1.0f;
+  String vendor, material, color, colorName;
+  if (reqByCode) {
+    dbgLogf("HTTP: GET spool/byCode/%s (instance %u)", reqUid.c_str(), g_dbInstance);
     // Foreign tag: resolve UID -> databaseId first, then continue exactly like a
     // native tag (g_flowSpoolId now holds the real databaseId for the rest of the flow).
     long id = -1;
-    known = spoolExistsByCode(g_flowLookupUid, id, name, err, &g_flowSpoolWeight,
-                              &g_flowTotalWeight, &g_flowVendor, &g_flowMaterial,
-                              &g_flowRemaining, &g_flowColor, &g_flowColorName);
-    if (known) g_flowSpoolId = id;
+    known = spoolExistsByCode(reqUid, id, name, err, &spoolWeight,
+                              &totalWeight, &vendor, &material,
+                              &remaining, &color, &colorName);
+    if (known) reqSpoolId = id;
     dbgLogf("HTTP: byCode -> known=%d databaseId=%ld instance=%d err=%s",
             known, id, g_dbUsedInstance, err.c_str());
   } else {
-    dbgLogf("HTTP: GET spool/%ld (instance %u)", g_flowSpoolId, g_dbInstance);
-    known = spoolExists(g_flowSpoolId, name, err, &g_flowSpoolWeight,
-                        &g_flowTotalWeight, &g_flowVendor, &g_flowMaterial,
-                        &g_flowRemaining, &g_flowColor, &g_flowColorName);
+    dbgLogf("HTTP: GET spool/%ld (instance %u)", reqSpoolId, g_dbInstance);
+    known = spoolExists(reqSpoolId, name, err, &spoolWeight,
+                        &totalWeight, &vendor, &material,
+                        &remaining, &color, &colorName);
     dbgLogf("HTTP: spool/%ld -> known=%d instance=%d err=%s",
-            g_flowSpoolId, known, g_dbUsedInstance, err.c_str());
+            reqSpoolId, known, g_dbUsedInstance, err.c_str());
   }
+  // Swapped tag while this was in flight -> the newer flow owns the state now.
+  if (gen != g_flowGen) {
+    dbgLogf("Flow: DB result for gen %u dropped (flow is at gen %u -- tag swapped)",
+            gen, (unsigned)g_flowGen);
+    return;
+  }
+  g_flowSpoolId    = reqSpoolId;
+  g_flowSpoolWeight = spoolWeight;
+  g_flowTotalWeight = totalWeight;
+  g_flowVendor      = vendor;
+  g_flowMaterial    = material;
+  g_flowRemaining   = remaining;
+  g_flowColor       = color;
+  g_flowColorName   = colorName;
   if (known) {
     g_flowSpoolName = name;
     g_flowMsg = "";
@@ -1073,7 +1251,8 @@ static void runDbCheck() {
       bool cacheFresh = (g_nfcExtCacheUid == g_pn5180Uid);
       g_flowForeignTag = cacheFresh && g_nfcExtCacheOccupancy == "foreign";
       g_flowEmptyTag   = cacheFresh && g_nfcExtCacheOccupancy == "empty";
-      g_flowMsg = g_flowForeignTag  ? "Not in database - add it in the browser"
+      g_flowMsg = g_flowUntrustedId ? "Foreign tag, number ignored - add it in the browser"
+                : g_flowForeignTag  ? "Not in database - add it in the browser"
                 : g_flowEmptyTag    ? "Ready to write"
                 : g_flowLookupByCode ? "Tag UID not assigned to a spool"
                                      : "Spool not in database";
@@ -1089,10 +1268,12 @@ static void runDbCheck() {
 // Resets the flow (cancel / after completion).
 static void flowReset(bool rearmSameTag = true) {
   g_flowState = FLOW_IDLE;
+  g_flowUid = "";
   g_flowSpoolId = -1;
   g_flowSpoolName = "";
   g_flowForeignTag = false;
   g_flowEmptyTag = false;
+  g_flowUntrustedId = false;
   g_flowPrinter = -1;
   g_flowToolCount = 0;
   g_flowTool = -1;
@@ -1179,6 +1360,21 @@ static void flowDoTool(int n) {
 // Reading confirmed: write the current scale weight to the SpoolManagerExtended DB.
 static void flowDoWeighSave() {
   displayTouch();
+  // Backstop. /flow/weigh and the TFT entry both check this before calling, and both give
+  // the user a better message than this one can. It is repeated here anyway because what
+  // follows is irreversible in two independent places -- the DB write has no way back (see
+  // the comment further down) and the tag write physically overwrites the spool's own
+  // record. This function already has two callers and may well get a third; a guard that
+  // lives at the call sites only is one refactor away from being gone.
+  if (!scaleZeroTrusted()) {
+    g_flowState = FLOW_ERROR;
+    g_flowMsg = String("Zero point not verified (") +
+                String(scaleZeroDeltaGrams(), 0) + " g) - tare first";
+    dbgLogf("flowDoWeighSave: refused, zero point %s (delta %.1f g)",
+            scaleZeroStateName(g_scaleZeroState), scaleZeroDeltaGrams());
+    buzzerError();
+    return;
+  }
   uint8_t idx = g_dbInstance < g_octoCount ? g_dbInstance : 0;
   g_flowGrossWeight = g_weight;  // live value (the spool is on the scale right now)
   g_flowState = FLOW_WEIGHING;
@@ -1197,6 +1393,15 @@ static void flowDoWeighSave() {
     g_flowState = FLOW_DONE;
     g_flowMsg = "Weight saved";
     buzzerSuccess();  // success tone + synced green LED pulse: weight saved
+
+    // Carry the newly measured remaining weight into the flow state. g_flowRemaining is
+    // otherwise only ever filled by the DB lookup at the START of the flow, so after a
+    // successful save both /flow/status and the TFT kept showing the PRE-weigh figure
+    // -- measured: the tag and the database read 696 g while the display still said
+    // 355 g. The gross reading and the empty-spool weight are both known here, so the
+    // value needs no second round-trip.
+    if (g_flowSpoolWeight >= 0.0f && g_flowGrossWeight >= 0.0f)
+      g_flowRemaining = g_flowGrossWeight - g_flowSpoolWeight;
 
     // Mirror the new remaining weight onto the tag -- the reader sits right at the
     // scale, so the spool that was just weighed is still on it. DB save already
@@ -1428,8 +1633,16 @@ void startWebServer() {
     server.send(200, "application/json", "{\"ok\":true}");
   });
 
+  // Weight plus the zero-point verdict. The verdict rides along here rather than being
+  // fetched separately because this is the 2 Hz poll the Operate tab already runs: the
+  // warning has to appear and clear at the same moment the number does, and a slower
+  // second request would leave the two disagreeing on screen. Still plain text, not JSON
+  // -- one extra field does not justify a parser on a poll this frequent.
+  // Format: "<grams>|<zeroState>|<deviation g>", e.g. "812.3|suspect|811.9".
   server.on("/weight", []() {
-    server.send(200, "text/plain", String(g_weight, 1));
+    server.send(200, "text/plain",
+                String(g_weight, 1) + "|" + scaleZeroStateName(g_scaleZeroState) + "|" +
+                String(scaleZeroDeltaGrams(), 1));
   });
 
   server.on("/tare", []() {
@@ -1464,6 +1677,15 @@ void startWebServer() {
     doc["raw"] = g_scaleRawLast;
     doc["offset"] = scale.get_offset();
     doc["scaleFactor"] = g_calFactor;
+    // Zero-point trust. zeroTrusted is the one field a consumer should branch on -- the
+    // others are there to explain it to a human. See ScaleZeroState for what "suspect"
+    // does and does not claim.
+    doc["zeroState"] = scaleZeroStateName(g_scaleZeroState);
+    doc["zeroTrusted"] = scaleZeroTrusted();
+    doc["zeroDeltaCounts"] = g_scaleZeroDelta;
+    doc["zeroDeltaGrams"] = scaleZeroDeltaGrams();
+    doc["zeroStoredOffset"] = g_scaleZeroStoredOff;
+    doc["zeroBootNoise"] = g_scaleZeroNoise;
     doc["lastReadAgoMs"] = g_scaleLastReadMs ? (millis() - g_scaleLastReadMs) : -1;
     // Sample std-dev over the rolling raw-value window -- a noisy/loose load cell or
     // bad wiring shows up here as a large number even while the weight readout itself
@@ -1657,6 +1879,12 @@ void startWebServer() {
     doc["ready"] = pn5180IsReady();
     bool present = (g_nfcProbe.type != PN5180_TAG_NONE);
     doc["present"] = present;
+    // False while a tag was detected but its Extended read has not finished (a few
+    // hundred ms on NTAG). A caller that polls once and acts on the answer should
+    // require present && complete; one that polls continuously can ignore it and
+    // simply see the fields settle. Absent on firmware older than this field, so
+    // treat a missing value as "unknown" rather than as false.
+    doc["complete"] = present && g_nfcProbe.complete;
     doc["type"] = (int)g_nfcProbe.type;           // 0=none,1=NFC-V,2=NFC-A
     doc["typeName"] = pn5180TagTypeName(g_nfcProbe.type);
     doc["uid"] = g_nfcProbe.uid;
@@ -1696,11 +1924,32 @@ void startWebServer() {
     // normal load flow; none -> falls back to a UID lookup (spool/byCode) if present.
     doc["idParsed"] = g_nfcProbe.idParsed;
     doc["idText"] = g_nfcProbe.idText;
+    // How trustworthy idParsed is: "extended" (came with a format magic), "legacy"
+    // (header-less ASCII field, shape-validated only), "unverified" (legacy AND the
+    // tag's occupancy says the data belongs to a foreign format -> almost certainly
+    // not our id), "" (no id). Computed here rather than in the probe itself because
+    // occupancy lives in the per-UID Extended cache, which the probe does not read.
+    // Without this, idParsed and occupancy could contradict each other in this very
+    // response -- a foreign tag with an inventory number "81" reported occupancy
+    // "foreign" and idParsed 81 side by side.
+    String idSource;
+    {
+      bool cacheFresh = present && g_nfcExtCacheUid == g_nfcProbe.uid;
+      pn5180ApplyIdTrust(g_nfcProbe.idParsed,
+                         cacheFresh ? g_nfcExtCacheOccupancy : String(""),
+                         cacheFresh && g_nfcExtCacheHasExtended,
+                         idSource);
+      doc["idSource"] = idSource;
+    }
     // Capability Container state (NFC-A/NTAG + NFC-V only, debug mode only -- see
     // pn5180ProbeCcState). "virgin"/"ndef"/"other", "" = n/a (Mifare, or not read).
     doc["ccState"] = g_nfcProbe.ccState;
+    // An "unverified" id is NOT offered as a databaseId: acting on it would load (or
+    // overwrite) a spool that merely shares its number with a foreign tag's own
+    // numbering. Falls back to the UID lookup, same as a tag with no id at all.
     doc["flowWouldUse"] = present
-      ? (g_nfcProbe.idParsed >= 0 ? "databaseId" : "uid (byCode lookup)")
+      ? ((g_nfcProbe.idParsed >= 0 && idSource != "unverified") ? "databaseId"
+                                                                : "uid (byCode lookup)")
       : "none";
     // Tag-type/format info (plan A.1) -- from the per-UID cache, populated on every
     // new-tag event regardless of debug mode (see the poll loop). "data" mirrors
@@ -1857,6 +2106,16 @@ void startWebServer() {
   // no TFT lock screen to race with, so there's no reason to delay it).
   server.on("/nfcdumpstatus", []() {
     JsonDocument doc;
+    // ?peek=1 reads the result without consuming it -- same contract as
+    // /nfcwritestatus, and for the same reason: the result is handed out exactly once,
+    // so a passive observer (a monitor watching alongside the client that started the
+    // dump) would otherwise take it away from that client. This endpoint was missed
+    // when peek was added to the write status, and the inconsistency was found by the
+    // SpoolManager session rather than by us: peek worked there, silently did nothing
+    // here, and the second read came back empty.
+    bool peek = server.hasArg("peek") &&
+                (server.arg("peek") == "1" || server.arg("peek") == "true");
+    doc["peek"] = peek;
     doc["pending"] = g_nfcDumpPending;
     doc["done"] = g_nfcDumpDone;
     if (g_nfcDumpDone) {
@@ -1891,7 +2150,7 @@ void startWebServer() {
           b["hex"] = String(hex);
         }
       }
-      g_nfcDumpDone = false;  // consumed
+      if (!peek) g_nfcDumpDone = false;  // consumed
     }
     String out;
     serializeJson(doc, out);
@@ -1994,6 +2253,16 @@ void startWebServer() {
   // /nfcwritestatus -- a caller stops polling as soon as it sees done:true.
   server.on("/nfcreadstatus", []() {
     JsonDocument doc;
+    // ?peek=1 reads without consuming -- the third endpoint with this contract, after
+    // /nfcwritestatus and /nfcdumpstatus. All three hand out their result exactly once,
+    // so any observer polling alongside the client that started the operation would
+    // take the result away from it. Added here proactively: the same inconsistency was
+    // found on the dump endpoint by an external consumer after peek had been added only
+    // to the write status. If a fourth single-shot status is ever added, it needs this
+    // too.
+    bool peek = server.hasArg("peek") &&
+                (server.arg("peek") == "1" || server.arg("peek") == "true");
+    doc["peek"] = peek;
     doc["pending"] = g_nfcReadPending;
     doc["done"] = g_nfcReadDone;
     if (g_nfcReadDone) {
@@ -2031,7 +2300,7 @@ void startWebServer() {
           if (requested && !ok) failed.add(s);
         }
       }
-      g_nfcReadDone = false;      // consumed
+      if (!peek) g_nfcReadDone = false;      // consumed
       g_nfcReadPending = false;
     }
     String out;
@@ -2265,6 +2534,20 @@ void startWebServer() {
   // (done=true seen), g_nfcWritePending clears so a new write can start.
   server.on("/nfcwritestatus", []() {
     JsonDocument doc;
+    // ?peek=1 reads the result WITHOUT consuming it: the status is normally cleared by
+    // whoever fetches it first, so a second reader sees done:false/pending:false and
+    // cannot tell "already collected" from "nothing happened". That bit a real
+    // observer -- a monitoring script polling this endpoint swallowed the write
+    // results another client was waiting for, and that client looked like it had a
+    // polling bug of its own. A peek lets an observer follow along without taking the
+    // result away from the client that actually issued the write.
+    // The status-consuming side effects (clearing the flags, and the LED flash that
+    // announces the outcome) are ALL skipped on a peek, not just the flags: flashing
+    // the result LED once per observer would turn a passive read into something the
+    // user sees.
+    bool peek = server.hasArg("peek") &&
+                (server.arg("peek") == "1" || server.arg("peek") == "true");
+    doc["peek"] = peek;
     doc["pending"] = g_nfcWritePending && !g_nfcWriteDone;
     doc["done"] = g_nfcWriteDone;
     if (g_nfcWriteDone) {
@@ -2341,14 +2624,16 @@ void startWebServer() {
       }
       // Green = clean write, amber = written but stripped down (see nfcWriteDropWarning),
       // red = failed. The amber case would otherwise look identical to a full success.
-      if (!g_nfcWriteOk) ledFlash(pixel.Color(LED_BRIGHT * 2, 0, 0), 1500);           // red
-      else if (g_nfcWriteKind == NFCWRITE_SPOOL &&
-               nfcWriteDropWarning(g_nfcWriteDroppedFields, g_nfcWriteFormat).length())
-        ledFlash(pixel.Color(LED_BRIGHT * 3, LED_BRIGHT * 2, 0), 1500);               // amber
-      else ledFlash(pixel.Color(0, LED_BRIGHT * 3, 0), 1500);                          // green
-      g_nfcWriteDone = false;     // consumed -> next poll reports idle
-      g_nfcWritePending = false; // /nfcwriteid|/nfcwritespool|/nfcerase can accept a new request
-      g_nfcWriteDoneAt = 0;
+      if (!peek) {
+        if (!g_nfcWriteOk) ledFlash(pixel.Color(LED_BRIGHT * 2, 0, 0), 1500);         // red
+        else if (g_nfcWriteKind == NFCWRITE_SPOOL &&
+                 nfcWriteDropWarning(g_nfcWriteDroppedFields, g_nfcWriteFormat).length())
+          ledFlash(pixel.Color(LED_BRIGHT * 3, LED_BRIGHT * 2, 0), 1500);             // amber
+        else ledFlash(pixel.Color(0, LED_BRIGHT * 3, 0), 1500);                        // green
+        g_nfcWriteDone = false;     // consumed -> next poll reports idle
+        g_nfcWritePending = false; // /nfcwriteid|/nfcwritespool|/nfcerase can accept a new request
+        g_nfcWriteDoneAt = 0;
+      }
     }
     String out;
     serializeJson(doc, out);
@@ -2410,6 +2695,14 @@ void startWebServer() {
   server.on("/flow/weigh", []() {
     if (g_flowState != FLOW_WEIGH_CONFIRM) {
       server.send(409, "text/plain", "Wrong flow state");
+      return;
+    }
+    // Refuse while the zero point is not backed up. The message names the observation and
+    // the way out, never a cause -- the firmware does not know why the reading deviates.
+    if (!scaleZeroTrusted()) {
+      server.send(409, "text/plain",
+                  String("Zero point not verified (deviation ") +
+                  String(scaleZeroDeltaGrams(), 0) + " g) - tare the empty scale first");
       return;
     }
     flowDoWeighSave();  // BLOCKING (octoSetMeasuredWeight) — runs in the loop() task
@@ -3057,7 +3350,23 @@ void scaleTask(void *param) {
     // Handle a tare request (web UI/TFT) here -> no concurrent HX711 access.
     if (g_tareReq) {
       g_tareReq = false;
-      if (g_scaleReady) { scale.tare(20); g_weight = 0; Serial.println("Tared (via flag)"); }
+      if (g_scaleReady) {
+        scale.tare(20);
+        g_weight = 0;
+        // A manual tare is the one statement the firmware cannot make itself: a human has
+        // confirmed that whatever is on the scale right now IS the intended zero point.
+        // That is why there is deliberately no empty-check here -- a permanently mounted
+        // holder or adapter legitimately belongs to the zero point, and the firmware
+        // cannot tell it apart from a spool left on by accident.
+        //
+        // Conversely this makes the tare the receipt that clears every unverified state,
+        // and the fresh offset becomes the new stored reference. Without this there would
+        // be no way back out of ZERO_SUSPECT at all.
+        applyTareOffset(scale.get_offset());
+        g_scaleZeroState = ZERO_OK;
+        g_scaleZeroDelta = 0;
+        Serial.println("Tared (via flag)");
+      }
     }
     g_scaleHxReady = g_scaleReady && scale.is_ready();
     // Watchdog: has the raw reading moved at all recently? Runs OUTSIDE the
@@ -3098,7 +3407,26 @@ void scaleTask(void *param) {
     }
     if (g_scaleHxReady) {
       float grams = scale.get_units(1);
-      if (grams < 0) grams = 0;
+      // A few tenths of a gram below zero is noise around the zero point -> keep clamping.
+      // A clearly negative value is real information: it says the zero point sits ABOVE
+      // the current resting reading. That is precisely the information the silent clamp
+      // used to destroy -- after a boot with a load on the scale, the empty scale showed a
+      // plausible 0.0 g and the error only became visible in the database. What gets
+      // protected here is the display, not the diagnosis: the state is set before the
+      // clamp. Which cause is behind it, this does not say.
+      //
+      // This also catches the one case no boot check can see: boot with a load, load
+      // removed later. The reading then drops well below zero and the state flips at
+      // runtime. Guarding on ZERO_OK keeps this from spamming the log and from overwriting
+      // a state that startScale() already decided.
+      if (grams < 0) {
+        if (grams < -SCALE_ZERO_TOL_G && g_scaleZeroState == ZERO_OK) {
+          g_scaleZeroState = ZERO_SUSPECT;
+          g_scaleZeroDelta = (long)(grams * g_calFactor);
+          dbgLogf("Scale zero: reading %.1f g below zero -> zero point marked unverified", grams);
+        }
+        grams = 0;
+      }
       g_weight = g_weight * 0.7f + grams * 0.3f;  // light smoothing (1 sample)
       // Diagnostics: raw (unscaled, untared) ADC value + rolling noise window. Cheap --
       // reuses the conversion already clocked out for get_units() above, no extra HX711
@@ -3162,7 +3490,54 @@ static void flowOnTagPresent(long id, const String &uid) {
     dbgLogf("Flow: suppressed for foreign tag %s (raw read in progress)", uid.c_str());
     return;
   }
-  if (!flowIdle) return;
+  // A different tag while a flow is up: the spool on the reader has been swapped, so
+  // the flow follows it. Previously any non-resting state made this return, which meant
+  // the swap was dropped -- and dropped for good, because the poll only calls us when
+  // the UID CHANGES (g_lastUid), and it had already latched the new one. Web UI and TFT
+  // then kept showing the old spool until the ask_* timeout or a manual cancel.
+  //
+  // The two blocking states are excluded: FLOW_LOADING and FLOW_WEIGHING are a
+  // half-finished HTTP call in loop() that writes g_flowState when it returns, so
+  // restarting underneath it would either lose the swap anyway or report the old call's
+  // result against the new spool. Those are short (one request) and end in DONE/ERROR,
+  // which IS a resting state, so the swap is picked up right after -- park it as a retry
+  // so the poll offers it again rather than losing it to the UID latch.
+  bool sameTag = (g_flowUid.length() && g_flowUid == uid);
+  if (!flowIdle && !sameTag) {
+    if (g_flowState == FLOW_LOADING || g_flowState == FLOW_WEIGHING) {
+      // Logged only on the first park: the poll re-offers a parked retry every tick, so
+      // while the HTTP call runs this re-parks itself several times per second.
+      if (g_flowRetryUid != uid)
+        dbgLogf("Flow: tag %s swapped in during a blocking call -> parked as retry", uid.c_str());
+      g_flowRetryUid = uid;
+      g_flowRetryId = id;
+      return;
+    }
+    dbgLogf("Flow: tag swapped (%s -> %s) in state %s -> restarting flow",
+            g_flowUid.c_str(), uid.c_str(), flowStateName(g_flowState));
+    flowReset(false);  // false: the NEW tag is on the reader, don't re-arm the latch
+  } else if (!flowIdle) {
+    return;  // same tag, flow already running for it -> nothing to do
+  }
+  // Cleared on every accepted trigger, not just in flowReset(): a rejected tag can be
+  // followed by a good one without the flow passing through flowReset() in between
+  // (FLOW_UNKNOWN is itself an idle state, so the next tag enters here directly), and a
+  // stale flag would mislabel that good tag's message.
+  g_flowUntrustedId = false;
+  // An id parsed out of the header-less legacy field on a tag whose occupancy says
+  // "foreign" is not credible: the legacy layout has no magic, so a third-party tag
+  // carrying ASCII digits at the same offset (an inventory number, say) parses exactly
+  // like one of ours. Acting on it would load a spool that merely shares that number --
+  // and on a write, could assign our data to the wrong spool or overwrite the other
+  // vendor's tag. Fall back to the UID lookup, which is what a tag with no id does.
+  // hasExtended ids are exempt: those matched a real format magic.
+  if (id >= 0 && g_nfcExtCacheUid == uid && !g_nfcExtCacheHasExtended &&
+      g_nfcExtCacheOccupancy == "foreign") {
+    dbgLogf("Flow: tag %s has legacy id %ld but foreign occupancy -> not trusted, "
+            "falling back to byCode lookup", uid.c_str(), id);
+    id = -1;
+    g_flowUntrustedId = true;
+  }
   if (id >= 0) {
     g_flowLookupByCode = false;
     g_flowSpoolId = id;
@@ -3181,6 +3556,22 @@ static void flowOnTagPresent(long id, const String &uid) {
   g_flowTool = -1;
   g_flowMsg = "";
   g_flowGrossWeight = 0.0f;
+  // Reference values from the PREVIOUS spool's DB lookup. runDbCheck() only assigns
+  // them when the lookup succeeds, so on a swap to a tag that isn't in the database the
+  // old spool's empty/total weight would still be sitting here and the weigh step would
+  // compute a remaining weight against the wrong reference.
+  g_flowSpoolName = "";
+  g_flowSpoolWeight = -1.0f;
+  g_flowTotalWeight = -1.0f;
+  g_flowRemaining = -1.0f;
+  g_flowVendor = "";
+  g_flowMaterial = "";
+  g_flowColor = "";
+  g_flowColorName = "";
+  g_flowForeignTag = false;
+  g_flowEmptyTag = false;
+  g_flowUid = uid;
+  g_flowGen++;             // invalidates a DB check still running for the previous tag
   g_flowState = FLOW_DB_CHECK;
   g_flowDbRequest = true;  // loop() runs the DB check
 }
@@ -3226,6 +3617,107 @@ static void flowOnTagGone(unsigned long &goneSince) {
   }
 }
 
+// Reads a quiet boot window and decides whether the stored zero point still holds, may be
+// re-measured, or whether the situation is unclear.
+//
+// No parameters, effect on the globals: this runs exactly once, from startScale(), before
+// scaleTask exists -- direct HX711 access is safe here, later it would not be (that is
+// what g_tareReq is for, see its comment above).
+static void scaleZeroEvaluate() {
+  // --- 1. measure a quiet window -------------------------------------------------
+  // Same formula as noiseStdDev in /scaleinfo, so the two numbers stay comparable.
+  long samples[SCALE_ZERO_STABLE_SAMPLES];
+  uint8_t n = 0;
+  uint32_t deadline = millis() + SCALE_ZERO_STABLE_TIMEOUT_MS;
+  while (n < SCALE_ZERO_STABLE_SAMPLES && (long)(millis() - deadline) < 0) {
+    if (!scale.wait_ready_timeout(300)) continue;
+    samples[n++] = scale.read();
+  }
+  if (n == 0) {
+    // The chip answered wait_ready_timeout() in startScale() but delivers nothing now.
+    // Nothing measured means nothing to state -- leave the offset alone and say so.
+    g_scaleZeroState = ZERO_UNSTABLE;
+    dbgLog("Scale zero: no readable samples during boot window -> zero point unverified");
+    return;
+  }
+  double sum = 0;
+  for (uint8_t i = 0; i < n; i++) sum += samples[i];
+  double mean = sum / n;
+  double sq = 0;
+  for (uint8_t i = 0; i < n; i++) { double d = samples[i] - mean; sq += d * d; }
+  float sd = (n >= 2) ? sqrt(sq / n) : 0.0f;
+  g_scaleZeroNoise = sd;
+  // Seed the rolling noise window too, so /scaleinfo right after boot doesn't report
+  // noiseSamples: 0 for the first few seconds.
+  for (uint8_t i = 0; i < n && i < SCALE_NOISE_WINDOW; i++) g_scaleNoiseBuf[i] = samples[i];
+  g_scaleNoiseCount = (n < SCALE_NOISE_WINDOW) ? n : SCALE_NOISE_WINDOW;
+  g_scaleNoiseIdx = g_scaleNoiseCount % SCALE_NOISE_WINDOW;
+  g_scaleRawLast = (long)mean;
+
+  // --- 2. load the stored offset, if it is comparable at all ---------------------
+  prefs.begin("octoscale", true);
+  bool hasStored = prefs.isKey("tareOff");
+  long storedOff = prefs.getLong("tareOff", 0);
+  float storedFac = prefs.getFloat("tareOffFac", 0.0f);
+  prefs.end();
+  // An offset is only comparable together with the factor it was written under, and only
+  // on a calibrated device (the 1.0 placeholder makes gram thresholds meaningless).
+  bool comparable = hasStored && storedFac == g_calFactor &&
+                    g_calFactor != DEFAULT_CALIBRATION_FACTOR;
+  if (hasStored) g_scaleZeroStoredOff = storedOff;
+
+  long tol = scaleZeroTolCounts();
+  long delta = comparable ? ((long)mean - storedOff) : 0;
+
+  // --- 3. decide -----------------------------------------------------------------
+  const char *what;
+  if (sd > SCALE_ZERO_STABLE_MAX_SD) {
+    // Too restless for any statement -> do NOT tare. Keep the stored offset if there is
+    // one, otherwise take the mean (the scale would be unusable without any offset) -- but
+    // the state stays unverified either way and the write guard bites. This does not clear
+    // itself: it takes a manual tare. That is deliberate, "it was restless at boot" is an
+    // observation a human has to resolve.
+    g_scaleZeroState = ZERO_UNSTABLE;
+    g_scaleZeroDelta = delta;
+    if (comparable) scale.set_offset(storedOff);
+    else            scale.set_offset((long)mean);
+    what = "unstable";
+  } else if (!comparable) {
+    // First boot, or the factor changed. Nothing to compare against, so behave as before
+    // -- but mark it honestly instead of pretending the zero point is confirmed.
+    applyTareOffset((long)mean);
+    g_scaleZeroState = ZERO_UNVERIFIED;
+    g_scaleZeroDelta = 0;
+    what = "unverified (no comparable stored offset)";
+  } else if (labs(delta) <= tol) {
+    // Within tolerance -> the scale counts as provably empty, so the fresh reading is the
+    // better zero point. This is the answer to temperature drift: it gets caught on every
+    // boot instead of accumulating.
+    applyTareOffset((long)mean);
+    g_scaleZeroState = ZERO_OK;
+    g_scaleZeroDelta = 0;
+    what = "ok";
+  } else {
+    // The central behaviour change: the OLD value wins, nothing is re-tared and nothing is
+    // written to NVS. If a spool really is sitting on it, the scale now shows that spool's
+    // weight instead of 0 -- visible, instead of silently wrong.
+    scale.set_offset(storedOff);
+    g_scaleZeroState = ZERO_SUSPECT;
+    g_scaleZeroDelta = delta;
+    what = "suspect";
+  }
+
+  // Raw numbers, no interpretation -- so a later debug log shows what was measured rather
+  // than what the firmware concluded.
+  dbgLogf("Scale zero: boot raw %ld, stored offset %ld (comparable=%d), delta %ld counts "
+          "(%.1f g @ factor %.4f, tol %ld), sd %.1f over %u samples -> %s",
+          (long)mean, storedOff, comparable ? 1 : 0, g_scaleZeroDelta,
+          (g_calFactor > 0.0f) ? ((float)g_scaleZeroDelta / g_calFactor) : 0.0f,
+          g_calFactor, tol, sd, (unsigned)n, what);
+  Serial.printf("Scale zero: %s (delta %.1f g, sd %.1f)\n",
+                what, scaleZeroDeltaGrams(), sd);
+}
+
 void startScale() {
   scale.begin(HX711_DOUT, HX711_SCK);
   if (!scale.wait_ready_timeout(2000)) {
@@ -3237,8 +3729,10 @@ void startScale() {
   prefs.end();
   scale.set_scale(g_calFactor);
   Serial.printf("Calibration factor: %.4f\n", g_calFactor);
-  Serial.println("Taring the scale (leave it empty)...");
-  scale.tare(20);
+  // Replaces the unconditional scale.tare(20) this used to do. That blind tare adopted
+  // whatever was on the scale at boot as the new zero -- see the ScaleZeroState comment.
+  Serial.println("Checking zero point...");
+  scaleZeroEvaluate();
   g_scaleReady = true;
   Serial.println("HX711 ready.");
 }
@@ -3651,6 +4145,31 @@ void pn5180Task(void *param) {
         g_nfcDumpTagType = "mifareClassic1k";
         dbgLogf("pn5180Task: dump request picked up, uid=%s", pr.uid.c_str());
         uint32_t dumpT0 = millis();
+        // Re-select before authenticating, for the same reason the NTAG branch above
+        // does it: pn5180Probe() ends with reset()+setupRF(), so the card is no longer
+        // selected here, and Crypto1 auth needs a live selection just as much as
+        // GET_VERSION does. Without it every sector failed with the uninitialised
+        // status 0xFF -- the chip never ran the RF handshake, so it never wrote a
+        // status byte back, and the occasional ok=1 was a transport artefact rather
+        // than a successful authentication. Traced on a real 1K tag (UID 0B06703B):
+        // the dump sent a byte-identical auth frame to the one the normal read path
+        // sends for block 4, and got RX FF where the read path gets RX 00. That is why
+        // /nfcdump failed on the very tag /nfcprobe was reading correctly at the same
+        // time -- a contradiction that stood unexplained since 2026-08-29.
+        PN5180ProbeResult mifSel;
+        if (!pn5180ProbeNfcA(mifSel) || mifSel.uid != pr.uid) {
+          g_nfcDumpErr = "tag moved away before the dump could start";
+          g_nfcDumpCount = 0;
+          g_nfcDumpUnitCount = 0;
+          g_nfcDumpMs = millis() - dumpT0;
+          g_nfcDumpAuthOkSectors = 0;
+          ok = false;
+          g_pn5180->reset(); g_pn5180->setupRF();
+          g_nfcDumpOk = ok;
+          g_nfcDumpDone = true;
+          g_nfcDumpPending = false;
+          continue;
+        }
         g_nfcDumpCount = pn5180DumpMifareClassic1k(pr.uid, g_nfcDumpBlocks);
         g_nfcDumpUnitCount = g_nfcDumpCount;   // 1 unit per row on Mifare
         g_nfcDumpMs = millis() - dumpT0;
@@ -3660,10 +4179,26 @@ void pn5180Task(void *param) {
         g_nfcDumpAuthOkSectors = 0;
         for (int i = 0; i < g_nfcDumpCount; i += 3)
           if (g_nfcDumpBlocks[i].sectorAuthOk) g_nfcDumpAuthOkSectors++;
-        ok = g_nfcDumpCount > 0;
-        if (!ok) g_nfcDumpErr = "dump failed (no blocks read)";
-        dbgLogf("pn5180Task: dump result ok=%d blocks=%d authSectors=%d/16 ms=%lu",
-                ok, g_nfcDumpCount, g_nfcDumpAuthOkSectors, (unsigned long)g_nfcDumpMs);
+        // Count rows that actually carry data, not rows that exist. pn5180Dump-
+        // MifareClassic1k emits all 48 rows regardless of outcome, marking the
+        // unreadable ones readOk:false -- so "count > 0" was true even when Crypto1
+        // auth failed on every single sector and not one byte of payload came back.
+        // Measured on a real tag: authOkSectors 0, all 48 rows readOk:false, 0 bytes,
+        // and the endpoint still reported ok:true with an empty error.
+        // Deliberately NOT keyed on authOkSectors: that counter is structurally 0 on
+        // NTAG and NFC-V (neither has an auth concept), so using it as the failure
+        // indicator would break those two carriers. readOk is the one field every
+        // carrier fills the same way.
+        int readableBlocks = 0;
+        for (int i = 0; i < g_nfcDumpCount; i++)
+          if (g_nfcDumpBlocks[i].readOk) readableBlocks++;
+        ok = readableBlocks > 0;
+        if (!ok) g_nfcDumpErr = g_nfcDumpAuthOkSectors == 0
+                              ? "dump failed (no sector authenticated -- wrong key?)"
+                              : "dump failed (no blocks read)";
+        dbgLogf("pn5180Task: dump result ok=%d rows=%d readable=%d authSectors=%d/16 ms=%lu",
+                ok, g_nfcDumpCount, readableBlocks, g_nfcDumpAuthOkSectors,
+                (unsigned long)g_nfcDumpMs);
       }
       g_pn5180->reset(); g_pn5180->setupRF();  // back to normal ISO15693 operation
       g_nfcDumpOk = ok;
@@ -3939,12 +4474,18 @@ void pn5180Task(void *param) {
                            g_nfcExtCacheFormatLabel, g_nfcExtCacheCapacityBytes,
                            pr.numPages, pr.numPagesPresent);
             g_nfcExtCacheUid = pr.uid;
-            bool dummyHasExt; PN5180TagType dummyType; long dummyId; String dummyUid, dummyText;
+            bool dummyHasExt; PN5180TagType dummyType; long extId; String dummyUid, dummyText;
             String nfcvFormatFound;
             int nfcvCapacityFound = -1;
-            if (pn5180ReadSpoolExOpt(dummyType, dummyId, dummyUid, dummyText, g_nfcExtCacheData,
+            if (pn5180ReadSpoolExOpt(dummyType, extId, dummyUid, dummyText, g_nfcExtCacheData,
                                   dummyHasExt, &nfcvFormatFound, &nfcvCapacityFound)) {
               g_nfcExtCacheHasExtended = dummyHasExt;
+              // NOTE: the Extended id is NOT substituted here. It used to be, and that
+              // was not enough -- this block is change-gated (type/uid differ), while
+              // the "g_nfcProbe = pr" below runs on every poll and put the raw legacy
+              // parse back. The substitution therefore lives at that assignment, driven
+              // by the cache this block fills. Keep it in exactly one place: two copies
+              // would silently disagree on any poll where only one of them ran.
               if (dummyHasExt && pr.type == PN5180_TAG_NFCV && nfcvFormatFound.length()) {
                 g_nfcExtCacheWriteFormat = nfcvFormatFound;
                 g_nfcExtCacheFormatLabel = (nfcvFormatFound == "nfcvOpenSpool")
@@ -3998,6 +4539,31 @@ void pn5180Task(void *param) {
             }
           }
         }
+        // Extended id substitution, applied on EVERY poll rather than only inside the
+        // change-gated block above. The block only runs when type/uid differ from the
+        // last probe, but this assignment runs every time -- so on a tag left lying on
+        // the reader, pr.idParsed (the raw legacy parse, -1 on an Extended tag whose
+        // page 4 holds "OX...") overwrote the substituted value again on the very next
+        // poll. Measured on a real ntagExtended tag: idParsed flipped to -1 and
+        // idSource to "extendedNoId" as soon as NFC debug was switched on, although
+        // the Extended read itself had succeeded and extended.databaseId read 120
+        // throughout. Taking the id from the cache rather than from the block's local
+        // makes the value independent of whether the block ran on this particular poll.
+        if (g_nfcExtCacheHasExtended && g_nfcExtCacheUid == pr.uid &&
+            g_nfcExtCacheData.databaseId >= 0) {
+          pr.idParsed = g_nfcExtCacheData.databaseId;
+          pr.idText = String(g_nfcExtCacheData.databaseId);
+        }
+        // No else needed here, unlike the normal branch below: pr comes straight out of
+        // pn5180Probe(), which ran its own legacy ID read this very poll, and the
+        // assignment below replaces g_nfcProbe wholesale. A non-Extended tag therefore
+        // already carries this poll's own value. The normal branch has to be explicit
+        // because it only ever writes individual fields of g_nfcProbe, so anything it
+        // does not assign survives from whatever ran before it.
+        // Debug mode reads everything it is going to read within this one poll (the
+        // gated block above fills the cache on a change, and pn5180Probe itself covers
+        // the rest), so the published result is never half-finished here.
+        pr.complete = (pr.type != PN5180_TAG_NONE);
         g_nfcProbe = pr;
       } else {
         // NORMAL OPERATION: read a tag (NFC-V OR NFC-A) + trigger the load flow.
@@ -4010,6 +4576,36 @@ void pn5180Task(void *param) {
           g_pn5180Uid = uidHex;
           g_nfcProbe.type = type;  // tag type for the TFT (short readout under the weight)
           g_nfcProbe.uid = uidHex;
+          // A newly arrived tag is incomplete until the gated block below has run its
+          // Extended read and occupancy probes. For a tag already seen, the cache is
+          // still valid, so the data stays complete across polls.
+          if (uidHex != g_lastUid) g_nfcProbe.complete = false;
+          // Keep idParsed in step with type/uid on EVERY poll, the same way the debug
+          // branch above does. Both branches gate their expensive work on "the tag
+          // changed", but they use SEPARATE state to decide that (this one g_lastUid,
+          // the other g_nfcProbe.type/uid). Toggling NFC debug hands the poll to the
+          // other branch, whose gate is still closed from the last real tag change --
+          // so neither branch refreshes idParsed and whatever the previously active
+          // branch left there stays, across the switch. Measured on a tag left lying on
+          // the reader: idParsed kept reading -1 for several polls AFTER debug was
+          // switched back off, then flipped to 120 again, with the tag never touched.
+          // The cache is filled by whichever branch last saw the tag arrive, so reading
+          // the id from it makes the reported value independent of which branch is
+          // currently active and of whether its gate happened to fire this poll.
+          if (g_nfcExtCacheHasExtended && g_nfcExtCacheUid == uidHex &&
+              g_nfcExtCacheData.databaseId >= 0) {
+            g_nfcProbe.idParsed = g_nfcExtCacheData.databaseId;
+            g_nfcProbe.idText = String(g_nfcExtCacheData.databaseId);
+          } else {
+            // No Extended id to substitute: report what this poll's own read found.
+            // pn5180ReadSpool() has just run unconditionally above, so `id` is current
+            // for THIS tag -- unlike the cache, which may still describe a tag that has
+            // since been taken off. Without this, a legacy or blank tag kept whatever
+            // the previously active branch left in idParsed, which is the same stale
+            // value the Extended case above fixes.
+            g_nfcProbe.idParsed = id;
+            g_nfcProbe.idText = idText;
+          }
           g_flowAskGoneSince = 0;  // tag present -> the UI's auto-reset countdown is off
           if (uidHex != g_lastUid) {  // new tag -> handle it once
             g_lastUid = uidHex;
@@ -4128,7 +4724,15 @@ void pn5180Task(void *param) {
                           uidHex.c_str(), pn5180TagTypeName(type), id);
             dbgLogf("NFC read: %s type=%s id=%ld text=%s", uidHex.c_str(),
                     pn5180TagTypeName(type), id, idText.c_str());
+            // `id` has been through the Extended substitution above, so this is the
+            // authoritative value for the newly arrived tag. The per-poll assignment
+            // near the top of this branch repeats it from the cache on every later
+            // poll; this one covers the arrival itself, where the cache was only just
+            // filled a few lines ago.
             g_nfcProbe.idParsed = id; g_nfcProbe.idText = idText;
+            // Extended read, classification and occupancy are done -- everything a
+            // caller reads out of g_nfcProbe now describes this tag.
+            g_nfcProbe.complete = true;
             flowOnTagPresent(id, uidHex);
           }
           // A trigger parked by the post-write suppression window: retry it once the

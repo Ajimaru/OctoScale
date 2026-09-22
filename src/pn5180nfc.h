@@ -36,6 +36,25 @@ struct PN5180ProbeResult {
   bool numPagesPresent = false;
   long idParsed = -1;    // databaseId parsed off the tag's data area (-1 = none/unparsable)
   String idText = "";    // raw characters read where the databaseId would be (debug only)
+  // How much the idParsed above can be trusted -- the legacy ID layout carries no magic
+  // and no checksum, so "there are digits at the right offset" is NOT proof the tag is
+  // ours. Consumers (the load flow, the SpoolManager plugin) need to tell the two apart:
+  //   "extended" -- id came from a self-describing format (ntagExtended's "OX" magic,
+  //                 octoscaleExtended's "OS", nfcvExtended, OpenSpool NDEF, TigerTag).
+  //                 A magic matched, so the id is as trustworthy as the format itself.
+  //   "legacy"   -- id came from the header-less ASCII field written by /nfcwriteid
+  //                 (pn5180WriteNtagId & friends). Shape-validated only. A foreign tag
+  //                 with digits in the same place is indistinguishable from ours.
+  //   "unverified" -- as "legacy", AND the tag's occupancy says "foreign": the CC/data
+  //                 area belongs to a format we did not write. Almost certainly not our
+  //                 id. Callers should refuse to act on it without asking the user.
+  //   "extendedNoId" -- a verified format that carries no OctoScale databaseId at all
+  //                 (TigerTag, OpenPrintTag). Structured data IS present, so this is
+  //                 NOT the same as "": a caller must not treat the tag as blank.
+  //   ""         -- no id parsed at all (idParsed == -1).
+  // Set by pn5180ApplyIdTrust() once occupancy is known; the raw read paths only ever
+  // produce "extended" or "legacy", since they cannot see the CC.
+  String idSource = "";
   // Capability Container state (NFC-A/NTAG + NFC-V only -- Mifare Classic has no CC
   // concept, stays ""). "virgin" = all-zero, never written; "ndef" = valid NDEF CC
   // (0xE1/0xE2 magic) -- the OTP bit is set and can NEVER be unset again, even by an
@@ -43,6 +62,14 @@ struct PN5180ProbeResult {
   // comment); "other" = neither (foreign/non-NDEF content, erase/write would refuse
   // to touch it); "" = not read (Mifare, or read failed).
   String ccState = "";
+  // False while a tag has been detected but its Extended read / occupancy probes have
+  // not finished yet. The poll loop publishes type and uid as soon as the tag answers,
+  // because the TFT needs them immediately, but the id and the format fields are only
+  // filled a few hundred milliseconds later. Without this flag that window is
+  // indistinguishable from a finished read of a tag that genuinely has no id, so a
+  // caller polling once could see an Extended tag as "empty, no id" and offer to
+  // overwrite it. A caller that only acts on complete data should require this.
+  bool complete = false;
 };
 
 // databaseId storage on the tag (uniformly ASCII decimal):
@@ -879,19 +906,98 @@ inline bool pn5180Probe(PN5180ProbeResult &out, bool readCc = false) {
 }
 
 // --- Read the databaseId off a tag (both types) ------------------------------
-// Parses ASCII decimal digits from the ID bytes until the first non-digit/space/NUL.
+// Parses the legacy ID layout: ASCII decimal digits followed by space/NUL padding to
+// the full field width -- exactly what pn5180WriteNtagId/pn5180WriteMifareId/
+// pn5180WriteNfcvId produce (digits, then ' ' padding out to PN5180_ID_BYTES).
 // Returns the parsed ID (>=0) or -1. textOut = the visible raw characters (for the UI).
+//
+// The trailing bytes are VALIDATED, not just used as a terminator. They used to be
+// treated as "stop here, whatever follows" -- which made any foreign tag carrying
+// leading ASCII digits parse as one of our IDs. A real case: an NTAG with an inventory
+// number "81" + spaces on page 4 and a foreign NDEF CC reported idParsed=81, i.e. a
+// third-party tag claiming to be spool 81 (see also the occupancy cross-check in
+// pn5180ApplyIdTrust, which this function deliberately does NOT do itself -- it has no
+// access to the CC and only judges the field's own shape).
+//
+// This cannot make the legacy layout self-describing: it carries no magic, so digits
+// with correct padding stay indistinguishable from a foreign tag that happens to look
+// the same. It only rejects the shapes our writers can never produce. Callers that need
+// the stronger judgement must combine this with occupancy (see PN5180ProbeResult::
+// idSource / pn5180ApplyIdTrust).
 static long pn5180ParseIdBytes(const uint8_t *bytes, int len, String &textOut) {
   textOut = "";
   String digits = "";
-  for (int i = 0; i < len; i++) {
+  int i = 0;
+  for (; i < len; i++) {
     char c = (char)bytes[i];
-    if (c == 0 || c == ' ') { textOut = digits; break; }  // terminator
     if (c >= '0' && c <= '9') { digits += c; textOut += c; }
-    else { textOut = digits; break; }                     // non-digit ends the ID
+    else break;
   }
   if (digits.length() == 0) return -1;
+  // The digit run must END inside the buffer, i.e. at least one padding byte must be
+  // visible. Digits running up to the last byte mean the field was truncated and the
+  // value is a PREFIX of the real id -- "1234567890" read as 8 bytes yields 12345678,
+  // a different, plausible-looking, entirely wrong spool. Callers pass a variable
+  // length here (pn5180ReadNfcvId passes however many bytes it managed to read), so
+  // this is reachable in practice, not just in theory.
+  if (i >= len) { textOut = ""; return -1; }
+  // Everything after the digits must be padding (space or NUL). Our writers pad with
+  // ' '; an erased/short field reads back NUL. Anything else -- another digit run, a
+  // letter, binary -- is not our layout.
+  for (; i < len; i++) {
+    char c = (char)bytes[i];
+    if (c != ' ' && c != 0) { textOut = ""; return -1; }
+  }
+  // A leading zero is never produced by String(long) for a value we wrote, so "0081"
+  // is somebody else's fixed-width field, not our ID. Plain "0" stays valid.
+  if (digits.length() > 1 && digits[0] == '0') { textOut = ""; return -1; }
+  // 10 digits is the widest uint32; more cannot be one of our IDs and would overflow
+  // toInt() silently.
+  if (digits.length() > 10) { textOut = ""; return -1; }
   return digits.toInt();
+}
+
+// Cross-checks a legacy-parsed id against the tag's occupancy and downgrades it when
+// the two disagree. This is the one place the two judgements meet: the ID parser reads
+// a fixed offset and knows nothing about the CC, while occupancy reads the CC and knows
+// nothing about the ID field. Until this existed they could contradict each other in a
+// single /nfcprobe response -- occupancy "foreign" (this is somebody else's format)
+// next to idParsed 81 (this is our spool 81), which is what the SpoolManager plugin ran
+// into on a third-party NTAG carrying an inventory number.
+//
+// Only "legacy" ids are downgraded. An "extended" id matched a real magic, so a
+// "foreign" occupancy next to it means the occupancy heuristic was wrong, not the id --
+// occupancy only inspects the CC and the first user page, which an Extended tag does
+// not use the way an NDEF tag does.
+//
+// The id is NOT cleared: /nfcprobe is a diagnostic endpoint and "there are digits here,
+// but they are not credible" is more useful than a bare -1, which cannot be told apart
+// from an empty field. Callers decide what to do with an "unverified" id; the load flow
+// refuses it (see main.cpp's flowWouldUse).
+inline void pn5180ApplyIdTrust(long idParsed, const String &occupancy,
+                               bool hasExtended, String &idSourceOut) {
+  // hasExtended is tested BEFORE idParsed, deliberately. On an Extended tag the legacy
+  // area holds the format's own header, not digits -- an ntagExtended page 4 reads
+  // "OX\x03\x00", which pn5180ParseIdBytes correctly refuses, leaving idParsed at -1.
+  // The id is still on the tag, in the Extended payload. Testing idParsed first made
+  // "extended" unreachable on exactly the path that reports the raw legacy parse (the
+  // NFC-debug poll branch assigns the probe result wholesale, while the normal branch
+  // substitutes the Extended id first), so turning NFC debug on silently downgraded a
+  // verified tag to "". A trust field that depends on a debug toggle is worse than no
+  // trust field, since a consumer cannot tell the two apart.
+  // Both conditions, not hasExtended alone: a format can be verified AND carry no
+  // OctoScale id. TigerTag is the live case (pn5180ReadSpoolExOpt's TigerTag branch
+  // sets hasExtended without touching idOut, deliberately -- the format has no
+  // databaseId field), and OpenPrintTag behaves the same way. Reporting "extended"
+  // there would claim a trustworthy id next to idParsed == -1, which is a promise the
+  // tag cannot keep.
+  if (hasExtended && idParsed >= 0) { idSourceOut = "extended"; return; }
+  // Verified format, no id of ours on it. Distinct from "" (nothing readable at all):
+  // a consumer must not fall back to a UID lookup here and then offer to write the
+  // tag, because there IS structured foreign data on it.
+  if (hasExtended) { idSourceOut = "extendedNoId"; return; }
+  if (idParsed < 0) { idSourceOut = ""; return; }
+  idSourceOut = (occupancy == "foreign") ? "unverified" : "legacy";
 }
 
 // NFC-A/NTAG: read the ID pages via READ (0x30). Requires the card to already be
@@ -941,6 +1047,10 @@ inline bool pn5180ReadNfcvId(const uint8_t *uidLsb, long &idOut, String &textOut
     blk++;
   }
   if (got == 0) return false;
+  // `got`, not PN5180_ID_BYTES: only the bytes actually read are passed. A short read
+  // (a block failed mid-field) must not be padded out with stale stack bytes, and
+  // pn5180ParseIdBytes rejects a digit run that reaches the end of what it was given,
+  // so a truncated field yields -1 rather than a prefix of the real id.
   idOut = pn5180ParseIdBytes(idBytes, got, textOut);
   return true;
 }
@@ -1073,7 +1183,11 @@ inline bool pn5180WriteNtagId(long id, String &errOut) {
   if (id < 0) { errOut = "invalid ID"; return false; }
 
   String s = String(id);
-  if ((int)s.length() > PN5180_ID_BYTES) { errOut = "ID too long"; return false; }
+  // 10, not PN5180_ID_BYTES: the field is 12 bytes wide, but pn5180ParseIdBytes only
+  // accepts up to 10 digits (the widest uint32) AND requires at least one padding byte
+  // after them. A wider value would be written and verified here, then read back as -1
+  // for the rest of the tag's life. Keep this bound and the parser's in step.
+  if ((int)s.length() > 10) { errOut = "ID too long"; return false; }
   uint8_t idbuf[PN5180_ID_BYTES];
   for (int i = 0; i < PN5180_ID_BYTES; i++)
     idbuf[i] = (i < (int)s.length()) ? (uint8_t)s[i] : (uint8_t)' ';
@@ -1374,17 +1488,27 @@ inline int pn5180DumpMifareClassic1kEx(const String &uidHex, MifareBlockDump *ou
   for (uint8_t sector = 0; sector < 16; sector++) {
     if (!(sectorMask & (1u << sector))) continue;
     uint8_t trailerBlock = sector * 4 + 3;
+    // Authenticate against the sector's first DATA block, not its trailer. Crypto1 auth
+    // is sector-wide, so either address unlocks the same sector -- but measured on a
+    // real 1K tag (UID 0B06703B, factory key), a trailer-addressed auth never gets a
+    // response back: every sector returned the uninitialised status 0xFF, including the
+    // two that reported ok=1, so even those were transport artefacts rather than
+    // successful authentications. The same key and mode against block 4 answers
+    // status=0x00 on every single poll, which is why the normal read path
+    // (pn5180ReadMifareExtended, block 4/8/12/16/36) always worked on the very tag whose
+    // dump failed completely. That contradiction stood unexplained since 2026-08-29.
+    uint8_t authBlock = sector * 4;
     String authErr;
     // Key A first, then Key B -- a rejected key costs one failed auth, and the tag
     // stays selected only as long as auth succeeds, so the retry re-selects below.
-    bool authOk = pn5180MifareAuth(uidHex, trailerBlock, authErr,
+    bool authOk = pn5180MifareAuth(uidHex, authBlock, authErr,
                                    keyA ? keyA[sector] : MIFARE_KEY_A, MIFARE_AUTH_KEY_A);
     if (!authOk && keyB) {
       // A failed auth drops the card out of the selected state -- without re-selecting,
       // the Key B attempt would fail for the wrong reason and look like a bad key.
       PN5180ProbeResult reselect;
       if (pn5180ProbeNfcA(reselect) && reselect.uid == uidHex)
-        authOk = pn5180MifareAuth(uidHex, trailerBlock, authErr,
+        authOk = pn5180MifareAuth(uidHex, authBlock, authErr,
                                   keyB[sector], MIFARE_AUTH_KEY_B);
     }
     uint8_t lastBlock = withTrailers ? trailerBlock : (uint8_t)(trailerBlock - 1);
@@ -1662,7 +1786,11 @@ inline bool pn5180WriteMifareId(long id, String &errOut) {
   if (id < 0) { errOut = "invalid ID"; return false; }
 
   String s = String(id);
-  if ((int)s.length() > PN5180_ID_BYTES) { errOut = "ID too long"; return false; }
+  // 10, not PN5180_ID_BYTES: the field is 12 bytes wide, but pn5180ParseIdBytes only
+  // accepts up to 10 digits (the widest uint32) AND requires at least one padding byte
+  // after them. A wider value would be written and verified here, then read back as -1
+  // for the rest of the tag's life. Keep this bound and the parser's in step.
+  if ((int)s.length() > 10) { errOut = "ID too long"; return false; }
   uint8_t idbuf[16];
   for (int i = 0; i < 16; i++)
     idbuf[i] = (i < (int)s.length()) ? (uint8_t)s[i] : (uint8_t)' ';
@@ -2553,7 +2681,11 @@ inline bool pn5180WriteNfcvId(long id, String &errOut) {
   if (id < 0) { errOut = "invalid ID"; return false; }
 
   String s = String(id);
-  if ((int)s.length() > PN5180_ID_BYTES) { errOut = "ID too long"; return false; }
+  // 10, not PN5180_ID_BYTES: the field is 12 bytes wide, but pn5180ParseIdBytes only
+  // accepts up to 10 digits (the widest uint32) AND requires at least one padding byte
+  // after them. A wider value would be written and verified here, then read back as -1
+  // for the rest of the tag's life. Keep this bound and the parser's in step.
+  if ((int)s.length() > 10) { errOut = "ID too long"; return false; }
   uint8_t idbuf[PN5180_ID_BYTES];
   for (int i = 0; i < PN5180_ID_BYTES; i++)
     idbuf[i] = (i < (int)s.length()) ? (uint8_t)s[i] : (uint8_t)' ';

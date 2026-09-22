@@ -33,6 +33,22 @@ Use an IP address for OTA. Hostname resolution through mDNS can introduce long d
 
 The reference board uses a WCH USB-UART bridge. The firmware is configured to use UART0 for the serial console rather than native USB-CDC. Keep the USB-CDC boot setting consistent with `platformio.ini` when changing board configurations.
 
+### Dev build numbering
+
+Every local build appends a running number to the version it reports — `0.0.3-dev7` rather than `0.0.3` — and copies its images into `artifacts/`. Flashing the same release version twice is otherwise indistinguishable on the display, in the web UI and over HTTP, which makes "which build is on the device?" unanswerable during a test session.
+
+`tools/dev_build.py` runs as a pre-script for both environments. It increments a counter, passes the result in as `FW_DEV_BUILD`, and after linking writes `artifacts/octoscale-<version>-<env>.bin`, the identical `-ota.bin`, and the matching `.elf`. Keep the `.elf`: a backtrace from the serial monitor cannot be resolved once the build it came from has been overwritten.
+
+The counter lives in `artifacts/.devcounter`, outside version control by way of `artifacts/` already being ignored. A number that changes on every build would otherwise make every test flash look like a source change. `src/version.h` keeps the release number in `FW_VERSION_RELEASE` and falls back to it when `FW_DEV_BUILD` is absent, so a clean checkout, a CI build or a release build reports a plain version with no dev suffix. Rename one of those macros and the script's pattern has to follow, or the version silently reads as `0.0.0`.
+
+Check what actually shipped by reading the binary rather than the build log, which only shows what the script intended:
+
+```bash
+strings artifacts/octoscale-0.0.3-dev1-esp32s3.bin | grep -o "0\.0\.3-dev[0-9]*"
+```
+
+The dev number separates local builds from each other; it does not make released versions unambiguous. Twenty-one commits shipped between the 0.0.2 and 0.0.3 bumps, all reporting the same version. Treat `fwVersion` and `currentVersion` as diagnostics rather than as a behaviour switch, and do not branch on them: a version that stays constant across that many commits separates nothing, and a later bump marks only devices built after it, never the ones already in the field. Where a consumer needs to know whether a capability exists, test for the field itself — `idSource` is simply absent on firmware that predates it.
+
 ## Boot and memory configuration
 
 The ESP32-S3-N16R8 configuration requires:
@@ -115,7 +131,7 @@ The encoder and buttons use internal pull-ups; the other side of each switch con
 
 The reader supports database-ID writes as well as extended spool payloads. Extended payload formats are selected by tag family and can include material, vendor, color, diameter, weights, and temperatures. NFC-V and NTAG formats may use either the project layout or OpenSpool-compatible NDEF where supported.
 
-Keep NFC work asynchronous at the HTTP boundary: start operations with the existing start endpoints, poll their status endpoints, and avoid long reader calls in request handlers. Unknown tags can be inspected through the raw dump/image paths without changing the normal spool flow.
+Keep NFC work asynchronous at the HTTP boundary: start operations with the existing start endpoints, poll their status endpoints, and avoid long reader calls in request handlers. The three single-shot status endpoints — `/nfcwritestatus`, `/nfcdumpstatus` and `/nfcreadstatus` — each hand out their result exactly once and clear it, so a second reader cannot tell "someone already collected it" from "nothing happened". Pass `?peek=1` to read without consuming (and, on the write status, without the LED flash that announces the outcome) when something other than the issuing client wants to follow along. Keep the three consistent: `peek` was first added to the write status alone, and the gap on the dump endpoint was found by an external consumer rather than here. A fourth status of this shape needs the same flag. Unknown tags can be inspected through the raw dump/image paths without changing the normal spool flow.
 
 ### Vendored PN5180 patches
 
@@ -129,6 +145,36 @@ The local PN5180 library contains four project changes documented in `lib/README
 Recheck all four when updating the vendored library. NFC-A probing also requires CRC to be disabled for REQA/ATQA and anticollision frames. Seven-byte UIDs need the cascade-level anticollision sequence. Mifare Classic writes use a two-step command/data exchange, while NTAG page writes require a fresh RF reset and re-selection for each page. After NFC-A work, restore the reader with `reset()` and `setupRF()` before returning to normal NFC-V polling.
 
 The legacy database ID is an ASCII decimal value stored in the tag's legacy area. Extended payload reads happen before flow lookup and take priority over the legacy ID. This ordering matters because an OpenSpool NTAG payload can overwrite the legacy pages and stores its ID as `os_db_id` in the NDEF/JSON data instead.
+
+### Trusting a parsed database ID
+
+The legacy layout is digits followed by space padding, with no magic number and no checksum. Nothing in it identifies the tag as ours. A third-party tag that happens to carry ASCII digits at the same offset — an inventory number, for instance — parses exactly like a tag this firmware wrote, and no amount of reading that field harder can tell the two apart.
+
+The parser therefore only rejects shapes our own writers cannot produce: trailing content that is not padding, more than one run of digits, a leading zero, or more than ten digits. Everything surviving that is plausible, not proven.
+
+It also requires the digit run to end inside the buffer it was given, with at least one padding byte visible. `pn5180ReadNfcvId` passes however many bytes it managed to read, so a block failing mid-field used to yield a prefix of the real ID — a five-digit ID read as four bytes returned a different, entirely plausible, wrong spool, with no error anywhere. The ten-digit ceiling is mirrored in the three ID writers; a wider value would be written and verified, then read back as `-1` for the rest of the tag's life.
+
+Proof, where it exists, comes from a second source. `occupancy` reads the Capability Container and the start of the data area, so it knows whether the tag carries a format this firmware wrote; the ID parser reads a fixed offset and knows nothing about the CC. `/nfcprobe` reports the combined judgement as `idSource`:
+
+| `idSource` | Meaning |
+| --- | --- |
+| `extended` | The ID arrived with a verified format magic (`OX`, `OS`, OpenSpool NDEF, TigerTag). As trustworthy as the format it came from. |
+| `legacy` | The ID came from the header-less field and passed the shape check. Plausible, unverifiable. |
+| `unverified` | A `legacy` ID on a tag whose `occupancy` is `foreign`. The data area belongs to a format this firmware did not write, so the digits are most likely someone else's numbering. |
+| `extendedNoId` | A verified format that carries no database ID of ours at all — TigerTag and OpenPrintTag both describe a spool without referencing this database. |
+| `""` | No ID was parsed. |
+
+`extendedNoId` is deliberately not `""`. Both mean "no usable ID", but the tag is not blank: it holds structured data from a format this firmware can read. A consumer that collapses the two will offer to overwrite a TigerTag.
+
+A tag that has just been placed on the reader is published in two steps: type and UID appear as soon as it answers, because the display needs them at once, while the ID and the format fields are only filled after the Extended read and the occupancy probes have run — a few hundred milliseconds on NTAG. `/nfcprobe` reports `complete: false` for that window. A consumer that polls continuously can ignore the flag and watch the fields settle; one that asks once and acts on the answer should require `present && complete`, or it may see an Extended tag as an empty one and offer to overwrite it. Firmware older than this field omits it, so treat a missing value as unknown rather than as false.
+
+`idSource` is a reported judgement, not an input to the flow. The load flow reaches its own verdict from the raw values — `hasExtendedData` and `occupancy` — and `flowWouldUse` only consults `idSource` to exclude `unverified`. Keep it that way: the firmware decides on what it read, the consumer receives the summary. It also means the current formats' habit of leaving `idParsed` at `-1` whenever `extendedNoId` applies is a property of those formats, not a guarantee of the field. A future format with both a verified magic and a populated legacy area would break that assumption, so do not build logic on it without checking the callers again.
+
+`idParsed` keeps the raw value even when `idSource` is `unverified`, because `/nfcprobe` is a diagnostic endpoint and "there are digits here, but they are not credible" is worth more to a caller than a bare `-1` that cannot be told apart from an empty field. The judgement, not the value, is what consumers should branch on. `flowWouldUse` and the load flow both refuse an `unverified` ID and fall back to the UID lookup.
+
+Note that `occupancy` alone is not that judgement. A tag written through `/nfcwriteid` onto previously NDEF-formatted material reports `foreign` while carrying a perfectly real ID, and an extended tag can report `foreign` because `occupancy` only inspects the CC and the first user page. Branching on `occupancy` instead of `idSource` discards both. Firmware older than this field omits it entirely, so a consumer that needs to support both should treat a missing `idSource` as "unknown, ask the user" rather than inferring one from `occupancy`.
+
+`writeFormat` and `formatLabel` answer a different question again: which format this firmware *would* write if asked right now. They are derived from the tag family alone and say nothing about what is currently on the tag — every non-Classic NFC-A tag reports `openSpool` whether or not it holds any NDEF at all. Use `hasExtendedData`, `occupancy`, and `idSource` to find out what a tag actually carries.
 
 ## Display, LED, and buzzer
 
@@ -159,6 +205,8 @@ The WebUI is embedded in `src/web_ui.h`. Periodic status requests are owned by t
 | Debug | `/nfcdebug` | 700 ms |
 | Debug diagnostics | `/nfc5180`, `/scaleinfo`, `/weight` | 1000 ms |
 
+`/weight` answers `<grams>|<zeroState>|<deviation g>` as plain text rather than a bare number. The zero-point verdict rides along on that poll instead of being fetched separately so the Operate tab's reading and its warning can never disagree on screen; a consumer that only wants the weight takes the first field.
+
 The Debug tab has two additional conditional loops. The menu preview polls `/menupreview` every 300 ms only while the preview is active. The debug console polls `/debuglog` every 500 ms only while debug logging is enabled. These loops stop when the Debug tab is left or the browser page is hidden.
 
 The header status LEDs are the one deliberate exception to tab ownership: they poll `/system` and `/wifi/status` every 10 s regardless of the active tab, because they are visible from all of them. They are still gated on page visibility, and the visibility handler refreshes them on return so they do not show stale state.
@@ -175,19 +223,35 @@ The UI-independent flow is:
 
 `idle -> db_check -> ask_action -> ask_printer -> ask_tool -> loading` or `weigh_confirm -> weighing -> done/error`
 
-The reader task detects the tag and raises a flow request. The networking loop performs the blocking SpoolManager call. Database lookup uses the database ID when available and falls back to the tag UID for foreign tags. Loading fetches the printer's tool count before selecting a tool. Weighing uses the live gross reading and only offers a remaining-weight calculation when empty and total spool weights are known.
+The reader task detects the tag and raises a flow request. The networking loop performs the blocking SpoolManager call. Database lookup uses the database ID when one is available and credible, and falls back to the tag UID for foreign tags. An ID parsed out of the header-less legacy area of a tag whose `occupancy` is `foreign` is deliberately not used (see "Trusting a parsed database ID"); the flow treats such a tag as having no ID at all and says so on the display, rather than silently loading whichever spool happens to share that number. Loading fetches the printer's tool count before selecting a tool. Weighing uses the live gross reading and only offers a remaining-weight calculation when empty and total spool weights are known.
 
 Tag removal keeps action/printer/tool selection open for the configured timeout. The weighing states are exempt because the spool can hide its tag while it remains on the scale. Keep this state-machine behavior independent of whether the request came from the TFT or web UI.
 
 ## Persistent configuration and backup
 
-Preferences are stored under the `octoscale` namespace. Important keys include the calibration factor, OctoPrint instance JSON, selected database instance, selection timeout, display brightness/timeouts, screensaver settings, buzzer settings, and debug-console enablement. WiFiManager stores WiFi credentials separately.
+Preferences are stored under the `octoscale` namespace. Important keys include the calibration factor, the tare offset and the factor it was written under, OctoPrint instance JSON, selected database instance, selection timeout, display brightness/timeouts, screensaver settings, buzzer settings, and debug-console enablement. WiFiManager stores WiFi credentials separately.
 
 Configuration backup is JSON. API keys are encrypted only when a passphrase is supplied, using PBKDF2-HMAC-SHA256 and AES-256-CBC with a random salt and IV. Without a passphrase, keys are omitted rather than exported in plaintext. Restore validates and decrypts the complete file before writing anything to NVS, so a bad password must leave the running configuration unchanged. The backup protects the file, not an unencrypted LAN transport.
 
 Device settings travel in a `settings` object addressed by NVS key, driven by the `BK_SETTINGS` table in `backup.h`. Adding a setting means adding one row there; export and import both walk the same table, so they cannot drift apart. Each row records the width the value is written with, because Preferences returns 0 when a `uint8` key is read back as `uint16`. Export skips keys that were never written, and import skips keys the file does not contain — an old backup therefore leaves newer settings at the running firmware's defaults instead of resetting them, which is also why the format version stays at 1. The table goes through NVS rather than the matching globals because `g_menuDark` is file-static in `menu.h`, included long after `backup.h`.
 
 `bkImport` only writes NVS. The `/restore` handler re-reads those keys into the globals afterwards and re-applies the theme and LED routing, since the running firmware holds them in RAM; without that, a restore appears to have been ignored until the next boot.
+
+## Zero point and tare
+
+The tare offset is persisted (`tareOff`), together with the calibration factor that was in effect when it was written (`tareOffFac`). Both are needed: an offset in ADC counts cannot be read as grams without its factor, so after a recalibration a gram threshold computed from the new factor against an offset written under the old one would be wrong. `applyCalFactor` therefore carries `tareOffFac` forward — without that line the stored offset would count as stale after every calibration.
+
+`startScale` no longer tares unconditionally. It calls `scaleZeroEvaluate`, which reads a short quiet window and compares its mean against the stored offset. Within tolerance the offset is refreshed from the fresh reading, which keeps temperature drift from accumulating. Outside tolerance the stored offset wins and nothing is written — the scale then displays the load that is actually on it instead of zero.
+
+The four states are reported as `zeroState` in `/scaleinfo`, with `zeroTrusted` as the field to branch on. `suspect` deliberately claims only that the reading deviates, never why: a single measurement cannot separate a load on the platform from cell drift or a rebuilt mechanism, so the firmware reports the observation and leaves the cause open. `unstable` means the boot window was too noisy to support any statement at all.
+
+`scaleTask` also flips a trusted zero to `suspect` when the reading drops well below zero at runtime. That is the one case no boot check can see: boot with a load, load removed afterwards. The negative reading is still clamped for display, but the state is set before the clamp — the clamp used to destroy exactly this information.
+
+Weighing is refused while the zero point is not trusted, at both entry points and again inside `flowDoWeighSave`, because that path writes to the database and then onto the tag, and neither has a way back. A manual tare is the only way out of `suspect` and `unstable`; it deliberately performs no empty check, since a permanently mounted holder legitimately belongs to the zero point and the firmware cannot tell it apart from a spool left on by accident.
+
+Both surfaces report the same thing the same way: the reading takes the warning color and a line underneath names the deviation and the remedy, on the TFT idle screen and in the Operate tab's weight card. The warning color is per theme in both (`MENU_WARN_FG` on the display, `--warn-fg` in CSS) because one amber cannot serve both backgrounds — the tone that stands out on black washes out on white. It is deliberately not the error red, which means "broken" on the footer chips, whereas an unconfirmed zero point is not a fault.
+
+Thresholds live in grams (`SCALE_ZERO_TOL_G`) and convert to counts at runtime, with a floor so they never fall under the cell's own noise. On an uncalibrated device the factor is the 1.0 placeholder, grams are meaningless, and the stored offset is treated as not comparable — the guard is inactive until the device is calibrated.
 
 ## WiFi and OctoPrint integration
 
