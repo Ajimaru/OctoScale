@@ -19,8 +19,27 @@ static const int BL_PWM_CH = 7;        // LEDC channel (high, avoids conflicts)
 static const int BL_PWM_FREQ = 20000;  // 20 kHz
 static const int BL_PWM_RES = 8;       // 8-bit -> 0..255
 
+// Level 0 = LEDC detached, pin held LOW as plain GPIO, so "off" does not depend on the PWM path.
+// Call only from pn5180Task or setup(): attach/detach reconfigures the pad.
+static bool g_blPwmAttached = false;
+
 inline void displaySetBacklight(uint8_t level) {
-  ledcWrite(BL_PWM_CH, level);
+  if (level == 0) {
+    digitalWrite(BL_PIN, LOW);   // latch LOW before detach -> no glitch high
+    if (g_blPwmAttached) {
+      ledcWrite(BL_PWM_CH, 0);
+      ledcDetachPin(BL_PIN);
+      g_blPwmAttached = false;
+    }
+    pinMode(BL_PIN, OUTPUT);
+    digitalWrite(BL_PIN, LOW);
+    return;
+  }
+  ledcWrite(BL_PWM_CH, level);   // duty before attach -> no stale-level flash
+  if (!g_blPwmAttached) {
+    ledcAttachPin(BL_PIN, BL_PWM_CH);
+    g_blPwmAttached = true;
+  }
 }
 
 inline bool displayInit() {
@@ -35,27 +54,33 @@ inline bool displayInit() {
   // deliberately not given to the library, so we have full control here.
   ledcSetup(BL_PWM_CH, BL_PWM_FREQ, BL_PWM_RES);
   ledcAttachPin(BL_PIN, BL_PWM_CH);
+  g_blPwmAttached = true;
   ledcWrite(BL_PWM_CH, 255);
 
   g_tftReady = true;
   return true;
 }
 
-// Panel power-down (third idle stage, after dimming and the logo screensaver).
-// Backlight PWM to 0 AND the ST7789 into sleep: the backlight alone is what makes the
-// panel look off, but the controller keeps driving the pixel matrix and burning ~15mA
-// while doing it, so both go. Order matters in each direction -- kill the light before
-// the controller sleeps, and let the controller wake (it needs ~120ms per datasheet
-// before it accepts drawing again) before the light comes back, otherwise the wake
-// shows a frame of garbage or a half-initialised image.
-static bool g_tftAsleep = false;
+// Display off (third idle stage, or a target brightness of 0): backlight off, and either
+// an all-black frame on an awake controller (default) or DISPOFF+SLPIN (saves ~15 mA).
+// On this panel backlight flashes were visibly stronger in SLPIN than on a driven black
+// frame (cause open). SLPIN order matters: light off before sleep, and ~120 ms after
+// SLPOUT before the light returns, otherwise the wake shows a garbage frame.
+static bool g_tftAsleep = false;       // logically off: nothing is drawn (see menuTick)
+static bool g_tftInSlpin = false;      // controller actually in SLPIN
+volatile bool g_panelSleepMode = false;  // true = DISPOFF+SLPIN, false = awake + black (/diag)
 
 inline void displaySleep() {
   if (!g_tftReady || g_tftAsleep) return;
   displaySetBacklight(0);
-  g_tft.writecommand(0x28);   // DISPOFF
-  g_tft.writecommand(0x10);   // SLPIN
-  delay(20);                  // datasheet: no further commands for 5ms after SLPIN
+  if (g_panelSleepMode) {
+    g_tft.writecommand(0x28);   // DISPOFF
+    g_tft.writecommand(0x10);   // SLPIN
+    delay(20);                  // datasheet: no further commands for 5ms after SLPIN
+    g_tftInSlpin = true;
+  } else {
+    g_tft.fillScreen(TFT_BLACK);
+  }
   g_tftAsleep = true;
 }
 
@@ -64,9 +89,12 @@ inline void displaySleep() {
 // change that woke us, and a forced repaint avoids showing a stale pre-sleep frame).
 inline bool displayWake(uint8_t level) {
   if (!g_tftReady || !g_tftAsleep) return false;
-  g_tft.writecommand(0x11);   // SLPOUT
-  delay(120);                 // datasheet: 120ms before the next command after SLPOUT
-  g_tft.writecommand(0x29);   // DISPON
+  if (g_tftInSlpin) {
+    g_tft.writecommand(0x11);   // SLPOUT
+    delay(120);                 // datasheet: 120ms before the next command after SLPOUT
+    g_tft.writecommand(0x29);   // DISPON
+    g_tftInSlpin = false;
+  }
   g_tftAsleep = false;
   displaySetBacklight(level);
   return true;

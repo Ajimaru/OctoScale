@@ -1896,6 +1896,8 @@ static const char *menuDeviceItemName(int i) {
 
 inline void menuTick(long delta, bool push, bool start) {
   if (!g_tftReady) return;
+  // Display off: draw nothing; the input that wakes it is consumed (wake-only, no blind action).
+  if (g_tftAsleep) return;
 
   // OTA in progress: lock screen + ignore all input, takes priority over everything
   // else (screensaver, menus, flow). menuRenderOta() only repaints the parts that
@@ -2130,7 +2132,7 @@ inline void menuTick(long delta, bool push, bool start) {
       g_menuScreen = MENU_FLOW;
       g_menuLastState = g_flowState;
       g_menuForceRedraw = true;
-      if (steps || push || start) displayTouch();
+      if (steps || push || start) displayTouch("input");
       menuRedraw();
     } else if (!g_tftAsleep) {
       // Still idle -> advance the bouncing logo one step. Skipped while the panel is

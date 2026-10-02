@@ -547,6 +547,12 @@ volatile bool g_otaInProgress = false;
 volatile uint8_t g_otaProgressPct = 0;   // 0..100
 volatile uint32_t g_otaUploadContentLength = 0;
 
+// Flicker diagnostics (/diag): pause the NFC poll (RF field off) or LED updates.
+volatile bool g_diagNfcPause = false;
+volatile bool g_diagLedPause = false;
+// Backlight trace in the debug log (web UI debug console switch, not persisted).
+volatile bool g_blDiagEnabled = false;
+
 // Display backlight + timeout (screensaver). After g_blTimeoutSec with no activity
 // (encoder/button, a real weight change, an NFC tag, web UI access) the display dims
 // from g_blActive to g_blDim. Activity resets g_blActivity (millis). pn5180Task drives
@@ -558,7 +564,13 @@ volatile unsigned long g_blActivity = 0;   // last activity timestamp (millis); 
                                            // the web UI + pn5180Task -> volatile
 
 // Callable from anywhere: "something happened" -> keep/wake the display.
-inline void displayTouch() { g_blActivity = millis(); }
+// Logs the source once per quiet period (>2 s), so an unexpected waker shows up in /debuglog.
+inline void displayTouch(const char *src = "other") {
+  unsigned long now = millis();
+  if (g_dbgLogEnabled && now - g_blActivity > 2000UL)
+    dbgLogf("Display: activity (%s) after %lus idle", src, (now - g_blActivity) / 1000UL);
+  g_blActivity = now;
+}
 
 // Logo screensaver (separate from backlight dimming above): after g_ssTimeoutSec idle
 // AND the flow sitting at FLOW_IDLE, the TFT menu shows the logo full-screen. Any
@@ -1043,6 +1055,10 @@ static void ledTick() {
   // Test menu (physical screen or web UI) owns the pixels directly right now -- back
   // off completely so ledTick() doesn't fight it every ~10ms. See g_ledTestActive.
   if (g_ledTestActive) return;
+  if (g_diagLedPause) {   // LEDs dark once, then no further RMT traffic
+    if (g_ledLastShown != 0 && ledShow(0)) g_ledLastShown = 0;
+    return;
+  }
   // OTA in progress overrides everything (including a buzzer tone mid-flight) -> the
   // traffic-light color is the only thing the LED should show right now.
   if (!g_otaInProgress && g_buzLedColor) return;  // a buzzer tone is driving the LED
@@ -1309,7 +1325,7 @@ static void flowReset(bool rearmSameTag = true) {
 
 // Printer chosen (idx): fetch tool count live -> ASK_TOOL or ERROR.
 static void flowDoPrinter(int idx) {
-  displayTouch();  // a flow action (web UI/TFT) counts as activity
+  displayTouch("flow");  // a flow action (web UI/TFT) counts as activity
   if (idx < 0 || idx >= g_octoCount) {
     g_flowState = FLOW_ERROR;
     g_flowMsg = "Invalid printer index";
@@ -1333,7 +1349,7 @@ static void flowDoPrinter(int idx) {
 
 // Tool chosen (n): call the SpoolManagerExtended load URL -> DONE/ERROR.
 static void flowDoTool(int n) {
-  displayTouch();
+  displayTouch("flow");
   if (n < 0 || n >= g_flowToolCount) {
     g_flowState = FLOW_ERROR;
     g_flowMsg = "Tool out of range";
@@ -1359,7 +1375,7 @@ static void flowDoTool(int n) {
 
 // Reading confirmed: write the current scale weight to the SpoolManagerExtended DB.
 static void flowDoWeighSave() {
-  displayTouch();
+  displayTouch("flow");
   // Backstop. /flow/weigh and the TFT entry both check this before calling, and both give
   // the user a better message than this one can. It is repeated here anyway because what
   // follows is irreversible in two independent places -- the DB write has no way back (see
@@ -1466,20 +1482,40 @@ void startWebServer() {
     server.send(200, "text/plain", "OctoScale v" FW_VERSION " (Build " FW_BUILD ")");
   });
 
-  // Live backlight brightness test: /backlight?level=0-255 (PWM, thread-safe). Helps
-  // narrow down whether flicker is brightness-/load-dependent (a hardware question).
+  // Live backlight brightness test: /backlight?level=0-255. pn5180Task applies it on its
+  // next loop pass (it owns the backlight pin). Helps narrow down whether flicker is
+  // brightness-/load-dependent (a hardware question).
   server.on("/backlight", []() {
     if (server.hasArg("level")) {
       int lv = server.arg("level").toInt();
       if (lv < 0) lv = 0;
       if (lv > 255) lv = 255;
       g_blActive = (uint8_t)lv;      // new active brightness
-      displaySetBacklight((uint8_t)lv);
-      displayTouch();                // using the slider counts as activity
+      displayTouch("web backlight"); // using the slider counts as activity
       server.send(200, "text/plain", String("backlight=") + lv);
     } else {
       server.send(400, "text/plain", "level=0..255 missing");
     }
+  });
+
+  // Flicker diagnostics: /diag?nfc=0|1&led=0|1 (0 = paused), panelsleep=1 (off =
+  // DISPOFF+SLPIN instead of awake+black, applies at the next off), tx=<0.25 dBm units,
+  // 34..84> sets WiFi TX power (not persisted, clamped so the link stays up). No args -> state.
+  server.on("/diag", []() {
+    if (server.hasArg("nfc")) g_diagNfcPause = (server.arg("nfc") == "0");
+    if (server.hasArg("led")) g_diagLedPause = (server.arg("led") == "0");
+    if (server.hasArg("panelsleep")) g_panelSleepMode = (server.arg("panelsleep") == "1");
+    if (server.hasArg("tx")) {
+      int q = server.arg("tx").toInt(); if (q < 34) q = 34; if (q > 84) q = 84;
+      WiFi.setTxPower((wifi_power_t)q);
+    }
+    JsonDocument doc;
+    doc["nfc"] = !g_diagNfcPause;
+    doc["led"] = !g_diagLedPause;
+    doc["panelsleep"] = g_panelSleepMode;
+    doc["tx"] = (int)WiFi.getTxPower();
+    String out; serializeJson(doc, out);
+    server.send(200, "application/json", out);
   });
 
   // Display settings (active/dim brightness + timeout). No args -> current values as
@@ -1488,7 +1524,7 @@ void startWebServer() {
     bool changed = false;
     if (server.hasArg("active")) {
       int v = server.arg("active").toInt(); if (v < 10) v = 10; if (v > 255) v = 255;
-      g_blActive = (uint8_t)v; displaySetBacklight(g_blActive); changed = true;
+      g_blActive = (uint8_t)v; changed = true;   // applied by pn5180Task
     }
     if (server.hasArg("dim")) {
       int v = server.arg("dim").toInt(); if (v < 0) v = 0; if (v > 255) v = 255;
@@ -1525,7 +1561,7 @@ void startWebServer() {
       p.putBool("offEnabled", g_offEnabled);
       p.putUShort("offTimeout", g_offTimeoutSec);
       p.end();
-      displayTouch();
+      displayTouch("web display");
     }
     JsonDocument doc;
     doc["active"] = g_blActive;
@@ -1649,7 +1685,7 @@ void startWebServer() {
     // Don't tare here (would block loop() + conflict with scaleTask over the HX711)
     // -> just set the flag.
     g_tareReq = true;
-    displayTouch();  // a web UI action counts as activity
+    displayTouch("web tare");  // a web UI action counts as activity
     server.send(200, "text/plain", "OK");
     Serial.println("Tare requested (via web UI)");
   });
@@ -3007,7 +3043,7 @@ void startWebServer() {
     menuApplyTheme();   // palette globals still hold the pre-restore theme
     ledPin2Apply();     // plain GPIO write, safe from either core
     g_ledLastShown = 0xFFFFFFFF;  // force ledTick() (core 0) to repaint with the new scaling
-    displayTouch();     // new idle timeouts start counting from now, not from the old activity
+    displayTouch("restore");  // new idle timeouts start counting from now, not from the old activity
     server.send(200, "application/json", octoListJson());
   });
 
@@ -3024,6 +3060,7 @@ void startWebServer() {
         p.end();
       }
     }
+    if (server.hasArg("bldiag")) g_blDiagEnabled = (server.arg("bldiag") == "1");
     // Serializing the whole ring buffer needs a contiguous String roughly the size of
     // the buffer itself. That used to be attempted unconditionally and could fail on a
     // low heap, killing the web server outright (firmware kept running, WiFi/HTTP dead
@@ -3039,6 +3076,7 @@ void startWebServer() {
     }
     JsonDocument doc;
     doc["enabled"] = g_dbgLogEnabled;
+    doc["blDiag"] = (bool)g_blDiagEnabled;
     doc["seq"] = g_dbgLogSeq;
     JsonArray lines = doc["lines"].to<JsonArray>();
     // Oldest-to-newest: start right after the write head (that's the oldest slot).
@@ -3407,6 +3445,7 @@ void scaleTask(void *param) {
     }
     if (g_scaleHxReady) {
       float grams = scale.get_units(1);
+      const float measured = grams;   // unclamped, for raw/noise below
       // A few tenths of a gram below zero is noise around the zero point -> keep clamping.
       // A clearly negative value is real information: it says the zero point sits ABOVE
       // the current resting reading. That is precisely the information the silent clamp
@@ -3430,8 +3469,10 @@ void scaleTask(void *param) {
       g_weight = g_weight * 0.7f + grams * 0.3f;  // light smoothing (1 sample)
       // Diagnostics: raw (unscaled, untared) ADC value + rolling noise window. Cheap --
       // reuses the conversion already clocked out for get_units() above, no extra HX711
-      // transaction (get_value() would trigger a second blocking read).
-      long raw = (long)(grams * g_calFactor) + scale.get_offset();
+      // transaction (get_value() would trigger a second blocking read). From the unclamped
+      // value: the clamped one is constant below zero and would look frozen to the stuck
+      // watchdog above.
+      long raw = (long)(measured * g_calFactor) + scale.get_offset();
       g_scaleRawLast = raw;
       g_scaleLastReadMs = millis();
       g_scaleNoiseBuf[g_scaleNoiseIdx] = raw;
@@ -3867,7 +3908,7 @@ void setup() {
   ledPin2Apply();    // WiFi connected before the NVS load above -> re-apply the saved
                      // setting, otherwise a disabled GPIO 2 LED would stay lit
   displaySetBacklight(g_blActive);  // apply the saved active brightness
-  displayTouch();                   // start the timeout countdown now (not dimmed)
+  displayTouch("boot");             // start the timeout countdown now (not dimmed)
   buzzerInit();
   Serial.printf("OctoPrint instances: %u, DB source: instance %u, ask timeout: %us\n",
                 g_octoCount, g_dbInstance, g_flowAskTimeoutSec);
@@ -4435,7 +4476,15 @@ void pn5180Task(void *param) {
     // preview frame. lastPoll is deliberately NOT updated here, so polling resumes
     // immediately (not delayed by up to one poll interval) once the preview ends.
     static uint32_t lastPoll = 0;
-    if (!g_menuPreviewActive && millis() - lastPoll >= PN5180_POLL_INTERVAL_MS) {
+    // reset() is the reliable RF-off here: the lib's setRF_off() waits unbounded for an
+    // IRQ that never comes if the field is already off.
+    static bool nfcPaused = false;
+    if (g_diagNfcPause != nfcPaused) {
+      nfcPaused = g_diagNfcPause;
+      if (g_pn5180) { if (nfcPaused) g_pn5180->reset(); else pn5180Recover(); }
+      dbgLog(nfcPaused ? "Diag: NFC poll paused, RF field off" : "Diag: NFC poll resumed");
+    }
+    if (!g_menuPreviewActive && !nfcPaused && millis() - lastPoll >= PN5180_POLL_INTERVAL_MS) {
       lastPoll = millis();
       if (g_nfcDebug) {
         // DEBUG MODE: reads + determines the tag TYPE (NFC-V and NFC-A), no flow.
@@ -4773,14 +4822,14 @@ void pn5180Task(void *param) {
       uint32_t pc = encoderPushCount(), sc = encoderStartCount();
       if (ep != blLastEncPos || pc != blLastPush || sc != blLastStart) {
         blLastEncPos = ep; blLastPush = pc; blLastStart = sc;
-        displayTouch();
+        displayTouch("encoder");
       }
       float wt = g_weight;
       if (fabsf(wt - blLastWeight) > 3.0f) {   // >3g = a real change, not noise
         blLastWeight = wt;
-        displayTouch();
+        displayTouch("weight");
       }
-      if (g_pn5180Present) displayTouch();
+      if (g_pn5180Present) displayTouch("tag");
 
       // Determine the target brightness: active, or dimmed after the timeout (0 = never).
       // OTA in progress -> stay at full brightness (the update screen must stay
@@ -4792,10 +4841,11 @@ void pn5180Task(void *param) {
       // not just while a tag happens to be present (that's g_nfcDebug alone, not
       // g_nfcDebug && tag-present -- the empty-reader "no tag" screen needs to be just
       // as readable while deciding where to place one).
+      bool forceOn = g_otaInProgress || g_nfcDebug;
       uint8_t target;
-      if (g_otaInProgress || g_nfcDebug) {
+      if (forceOn) {
         target = g_blActive;
-        displayTouch();
+        displayTouch(g_otaInProgress ? "ota" : "nfc debug");
       } else if (g_blTimeoutSec > 0 &&
                  millis() - g_blActivity >= (unsigned long)g_blTimeoutSec * 1000UL) {
         target = g_blDim;
@@ -4808,12 +4858,13 @@ void pn5180Task(void *param) {
       // three stages cascade naturally (dim -> logo -> off) as idle time grows.
       // Suppressed entirely during OTA / NFC debug via the branch above, which keeps
       // touching the activity clock -- those two need a readable screen throughout.
-      bool wantOff = g_offEnabled && g_offTimeoutSec > 0 &&
-                     !(g_otaInProgress || g_nfcDebug) &&
-                     millis() - g_blActivity >= (unsigned long)g_offTimeoutSec * 1000UL;
+      // A target brightness of 0 switches the display off too: nothing on it would be visible.
+      bool offByTimeout = g_offEnabled && g_offTimeoutSec > 0 &&
+                          millis() - g_blActivity >= (unsigned long)g_offTimeoutSec * 1000UL;
+      bool wantOff = !forceOn && (offByTimeout || target == 0);
       if (wantOff) {
         if (!g_tftAsleep) {
-          dbgLog("Display: off (idle timeout)");
+          dbgLog(offByTimeout ? "Display: off (idle timeout)" : "Display: off (brightness 0)");
           displaySleep();
           blCurLevel = 0;   // so the wake below always re-applies a real level
         }
@@ -4831,6 +4882,15 @@ void pn5180Task(void *param) {
       if (!g_tftAsleep && target != blCurLevel) {
         blCurLevel = target;
         displaySetBacklight(target);
+      }
+
+      // Backlight trace: state every 10 s while switched on in the web UI debug console.
+      static unsigned long blDiagAt = 0;
+      if (g_dbgLogEnabled && g_blDiagEnabled && millis() - blDiagAt >= 10000UL) {
+        blDiagAt = millis();
+        dbgLogf("BL diag: idle=%lums target=%u cur=%u asleep=%d wantOff=%d offEn=%d offT=%us dimT=%us",
+                millis() - g_blActivity, target, blCurLevel, (int)g_tftAsleep, (int)wantOff,
+                (int)g_offEnabled, (unsigned)g_offTimeoutSec, (unsigned)g_blTimeoutSec);
       }
     }
 

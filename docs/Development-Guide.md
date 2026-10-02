@@ -180,7 +180,9 @@ Note that `occupancy` alone is not that judgement. A tag written through `/nfcwr
 
 ## Display, LED, and buzzer
 
-The TFT uses TFT_eSPI configured through `platformio.ini` build flags. The backlight is controlled by LEDC PWM on GPIO 41; do not hand the backlight pin to TFT_eSPI in a way that lets display initialization override the PWM.
+The TFT uses TFT_eSPI configured through `platformio.ini` build flags. The backlight is controlled by LEDC PWM on GPIO 41; do not hand the backlight pin to TFT_eSPI in a way that lets display initialization override the PWM. At runtime only `pn5180Task` writes the backlight: `/backlight` and `/display` set the level and count as activity, and the task applies it on its next loop pass. Level 0 detaches LEDC and holds the pin LOW as a plain GPIO.
+
+The display is off in the third idle stage and whenever the target brightness is 0. Off means backlight off on an all-black frame with the controller awake; `DISPOFF`+`SLPIN` would save about 15 mA, but on the reference panel backlight flashes were visibly stronger in sleep mode (cause not established). Nothing is drawn while off, and the input that wakes the display is consumed.
 
 The onboard WS2812 on GPIO 48 and the external enclosure LED on GPIO 9 are mirrors. Drive both through the shared LED helper so color and timing stay synchronized. The passive buzzer uses LEDC PWM and shares event state with the LED pulse logic.
 
@@ -191,6 +193,17 @@ The TFT has four important takeover screens: the boot splash, the idle logo scre
 ## Debug console and memory
 
 The optional web debug console is an in-RAM ring buffer intended to replace serial monitoring when the device runs from external power. Logging is inert while disabled. Keep the buffer bounded and avoid serializing it when free heap is low: `/debuglog` should fail clearly rather than allocating a second large contiguous JSON string and taking down the web server. High-frequency traces, such as repeated successful Mifare authentication or unchanged weight readings, must be gated or rate-limited. Prefer chunked streaming if substantially more history is ever needed.
+
+Display wakes are logged once per quiet period as `Display: activity (<source>) after <n>s idle`, which names an unexpected waker directly. The console's *Backlight trace* switch (`/debuglog?bldiag=1`, reported as `blDiag`, not persisted) adds a `BL diag` line every 10 s: idle time, target and current level, and whether the display is off.
+
+`/diag` switches off suspected sources of display interference one at a time, without a reflash. Nothing it sets is persisted; without parameters it returns the current state as JSON.
+
+| Parameter | Effect |
+| --- | --- |
+| `nfc=0` / `nfc=1` | Pause the tag poll with the PN5180 RF field off / resume. No tags are detected while paused. |
+| `led=0` / `led=1` | Stop LED updates with both pixels dark / resume |
+| `tx=34`…`84` | WiFi TX power in 0.25 dBm steps (80 = 20 dBm, the default) |
+| `panelsleep=1` / `0` | Display off uses `DISPOFF`+`SLPIN` / the awake black frame; applies at the next off |
 
 ## WebUI polling and tab ownership
 

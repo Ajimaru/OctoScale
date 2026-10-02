@@ -74,9 +74,11 @@ If the scale has never been calibrated, the idle screen carries a `Calibrate sca
 
 After a period with no input the display steps down through three stages, all configurable in the web UI under System → Display:
 
-1. **Dim** — backlight drops to the dim level (default after `timeout` seconds).
+1. **Dim** — backlight drops to the dim level (default after `timeout` seconds). A dim level of 0 turns the display off instead.
 2. **Screensaver** — a bouncing logo, default after 60 s.
-3. **Off** — backlight fully off, default after 300 s, if enabled.
+3. **Off** — display and backlight off, default after 300 s, if enabled.
+
+All three timeouts are in seconds. While the display is off, the first turn or press only wakes it and triggers nothing else.
 
 | Boot splash | Screensaver |
 | --- | --- |
@@ -239,7 +241,7 @@ The file covers the whole configuration: the calibration factor, every OctoPrint
 
 ### Debug
 
-A live log of NFC reads and HTTP calls. This polls at a high rate and only runs while the Debug tab is open and the browser tab visible, so leaving it open in a background window costs nothing.
+A live log of NFC reads and HTTP calls. This polls at a high rate and only runs while the Debug tab is open and the browser tab visible, so leaving it open in a background window costs nothing. **Backlight trace** adds the display state every 10 s; it needs the log switched on and is off again after a restart.
 
 ## Troubleshooting
 
