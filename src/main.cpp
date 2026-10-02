@@ -2089,8 +2089,8 @@ void startWebServer() {
       PN5180ChipStatus cs = pn5180ReadChipStatus();
       JsonObject chip = doc["chip"].to<JsonObject>();
       chip["ok"] = cs.ok;
-      char hex[33]; int hn = 0;
-      for (int i = 0; i < 16; i++) hn += snprintf(hex + hn, sizeof(hex) - hn, "%02X", cs.dieId[i]);
+      char hex[33];
+      for (int i = 0; i < 16; i++) snprintf(hex + 2 * i, 3, "%02X", cs.dieId[i]);
       chip["dieId"] = String(hex);
       // Raw bytes, not "major.minor" -- unlike PRODUCT_VERSION/FIRMWARE_VERSION (whose
       // major.minor layout the atrappmann library's own boot log already relies on),
