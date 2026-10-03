@@ -993,26 +993,41 @@ static const char INDEX_HTML[] PROGMEM =
     "}"
     "});});}"
     // ---- Debug console ----
-    "var dbgSeq=-1;"
-    "function dbgset(cb){fetch('/debuglog?on='+(cb.checked?1:0)).then(r=>r.json()).then(o=>{"
-    "document.getElementById('dbgbox').style.display=o.enabled?'':'none';"
+    // Incremental: the first fetch gets the whole buffer, every later one only the lines
+    // after dbgSeq from the same boot (/debuglog?since=&boot=, see main.cpp). The box keeps
+    // the newest 400 lines, like the device (DBGLOG_LINES in dbglog.h).
+    "var dbgSeq=-1,dbgBoot=0,dbgLines=[],dbgT=0,dbgBusy=0;"
+    "function dbgq(){return dbgSeq<0?'':'since='+dbgSeq+'&boot='+dbgBoot;}"
+    // Applies a reply only if no other reply has moved dbgSeq on since its request went
+    // out (q): two replies from the same starting point would add the same lines twice.
+    // No lines at all = the 503 a low heap answers with -> keep what is shown.
+    "function dbgshow(o,q){if(!o.lines||dbgSeq!==q)return;"
+    "if(o.full)dbgLines=[];"
+    "if(o.lost)dbgLines.push('--- '+o.lost+' lines overwritten before they could be fetched ---');"
+    "if(o.full||o.lost||o.lines.length){dbgLines=dbgLines.concat(o.lines);"
+    "if(dbgLines.length>400)dbgLines=dbgLines.slice(-400);"
+    "var b=document.getElementById('dbgbox');b.textContent=dbgLines.join('\\n');b.scrollTop=b.scrollHeight;}"
+    "dbgSeq=o.seq;dbgBoot=o.boot;}"
+    "function dbgset(cb){var q=dbgSeq;fetch('/debuglog?on='+(cb.checked?1:0)+'&'+dbgq()).then(r=>r.json()).then(o=>{"
+    "document.getElementById('dbgbox').style.display=o.enabled?'':'none';dbgshow(o,q);"
     "if(o.enabled)dbgpoll();});}"
     // Self-chaining 500ms poll -- the fastest loop in the page. Stops while the tab is
     // hidden or the user has switched to another tab (the visibilitychange handler and
     // tabRefresh at the bottom restart it on return), so neither a backgrounded window
-    // nor a switched-away debug console keeps pulling the log.
-    "function dbgpoll(){var cb=document.getElementById('dbge');if(!cb.checked)return;"
+    // nor a switched-away debug console keeps pulling the log. One request at a time
+    // (dbgBusy) and one pending timer (dbgT), however often it gets restarted.
+    "function dbgpoll(){clearTimeout(dbgT);if(dbgBusy)return;"
+    "var cb=document.getElementById('dbge');if(!cb.checked)return;"
     "if(document.hidden||currentTab!=='debug')return;"
-    "fetch('/debuglog').then(r=>r.json()).then(o=>{"
-    "if(o.seq!==dbgSeq){dbgSeq=o.seq;var b=document.getElementById('dbgbox');"
-    "b.textContent=o.lines.join('\\n');b.scrollTop=b.scrollHeight;}"
-    "setTimeout(dbgpoll,500);});}"
-    "function bldset(cb){fetch('/debuglog?bldiag='+(cb.checked?1:0));}"
-    "function dbgload(){fetch('/debuglog').then(r=>r.json()).then(o=>{"
+    "var q=dbgSeq;dbgBusy=1;fetch('/debuglog?'+dbgq()).then(r=>r.json()).then(o=>{"
+    "dbgBusy=0;dbgshow(o,q);dbgT=setTimeout(dbgpoll,500);})"
+    ".catch(()=>{dbgBusy=0;dbgT=setTimeout(dbgpoll,2000);});}"
+    "function bldset(cb){fetch('/debuglog?bldiag='+(cb.checked?1:0)+'&'+dbgq());}"
+    "function dbgload(){var q=dbgSeq;fetch('/debuglog?'+dbgq()).then(r=>r.json()).then(o=>{"
     "document.getElementById('dbge').checked=o.enabled;"
     "document.getElementById('bldg').checked=!!o.blDiag;"
     "document.getElementById('dbgbox').style.display=o.enabled?'':'none';"
-    "if(o.enabled)dbgpoll();});}"
+    "dbgshow(o,q);if(o.enabled)dbgpoll();});}"
     // ---- Load flow ----
     "var lastState='';"
     // Color CSS matching SpoolManagerExtended (_buildSpoolColorCss / spmSpoolColorCss). Code

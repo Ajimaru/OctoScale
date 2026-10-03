@@ -3067,14 +3067,29 @@ void startWebServer() {
       }
     }
     if (server.hasArg("bldiag")) g_blDiagEnabled = (server.arg("bldiag") == "1");
+    // ?since=<seq>&boot=<id>: only the lines after <seq>, as long as <id> is this boot's.
+    // Anything else (no since, another boot, a seq from the future) gets the whole buffer,
+    // flagged "full". The console polls every 500 ms (dbgpoll() in web_ui.h); re-sending
+    // the whole buffer each time is mostly wasted work for loop() and the WiFi stack.
+    static uint32_t bootId = 0;  // random per boot: tells a restart apart from a quiet log
+    if (!bootId) bootId = esp_random() | 1;  // first request, WiFi is up -> hardware RNG
+    uint32_t since = 0;
+    bool full = true;
+    if (server.hasArg("since") && server.arg("boot") == String(bootId)) {
+      since = strtoul(server.arg("since").c_str(), nullptr, 10);
+      full = since > g_dbgLogSeq;
+      if (full) since = 0;
+    }
     // Serializing the whole ring buffer needs a contiguous String roughly the size of
     // the buffer itself. That used to be attempted unconditionally and could fail on a
     // low heap, killing the web server outright (firmware kept running, WiFi/HTTP dead
     // until reset -- see DBGLOG_LINES' comment). Bail out with a normal HTTP error
     // instead of taking the server down: the caller sees a clear message, and the
-    // buffer stays intact for a later retry once memory frees up.
+    // buffer stays intact for a later retry once memory frees up. Only a big reply needs
+    // the margin -- a full dump or a client far behind -- so the console keeps streaming
+    // new lines on a low heap, which is when they matter most.
     uint32_t freeHeap = ESP.getFreeHeap();
-    if (freeHeap < DBGLOG_MIN_HEAP_FOR_DUMP) {
+    if ((full || g_dbgLogSeq - since > 50) && freeHeap < DBGLOG_MIN_HEAP_FOR_DUMP) {
       server.send(503, "application/json",
                   "{\"error\":\"low memory, debug log not dumped\",\"heapFree\":" +
                   String(freeHeap) + "}");
@@ -3083,13 +3098,14 @@ void startWebServer() {
     JsonDocument doc;
     doc["enabled"] = g_dbgLogEnabled;
     doc["blDiag"] = (bool)g_blDiagEnabled;
-    doc["seq"] = g_dbgLogSeq;
+    doc["boot"] = bootId;
+    doc["full"] = full;
     JsonArray lines = doc["lines"].to<JsonArray>();
-    // Oldest-to-newest: start right after the write head (that's the oldest slot).
-    for (int i = 0; i < DBGLOG_LINES; i++) {
-      String &l = g_dbgLogBuf[(g_dbgLogHead + i) % DBGLOG_LINES];
-      if (l.length()) lines.add(l);
-    }
+    uint32_t lost;
+    doc["seq"] = dbgLogRead(since, lost, [&lines](const String &l) { lines.add(l); });
+    if (lost && !full) doc["lost"] = lost;  // overwritten before this poll could fetch them
+    uint32_t dropped = __atomic_load_n(&g_dbgLogDropped, __ATOMIC_RELAXED);
+    if (dropped) doc["dropped"] = dropped;
     String out;
     serializeJson(doc, out);
     server.send(200, "application/json", out);
