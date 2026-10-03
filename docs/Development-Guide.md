@@ -180,7 +180,7 @@ Note that `occupancy` alone is not that judgement. A tag written through `/nfcwr
 
 ## Display, LED, and buzzer
 
-The TFT uses TFT_eSPI configured through `platformio.ini` build flags. The backlight is controlled by LEDC PWM on GPIO 41; do not hand the backlight pin to TFT_eSPI in a way that lets display initialization override the PWM. At runtime only `pn5180Task` writes the backlight: `/backlight` and `/display` set the level and count as activity, and the task applies it on its next loop pass. Level 0 detaches LEDC and holds the pin LOW as a plain GPIO.
+The TFT uses TFT_eSPI configured through `platformio.ini` build flags. The backlight is controlled by LEDC PWM on GPIO 41; do not hand the backlight pin to TFT_eSPI in a way that lets display initialization override the PWM. At runtime only `pn5180Task` writes the backlight: `/backlight` and `/display` set the level and count as activity, and the task applies it on its next loop pass. Level 0 detaches LEDC and holds the pin LOW as a plain GPIO. Coming back, the pin is re-attached before the level is written: `ledcAttachPin()` re-applies the duty it reads back, and the read-back shows a new duty only from the next PWM cycle on.
 
 The display is off in the third idle stage and whenever the target brightness is 0. Off means backlight off on an all-black frame with the controller awake; `DISPOFF`+`SLPIN` would save about 15 mA, but on the reference panel backlight flashes were visibly stronger in sleep mode (cause not established). Nothing is drawn while off, and the input that wakes the display is consumed.
 
@@ -194,9 +194,9 @@ The TFT has four important takeover screens: the boot splash, the idle logo scre
 
 The optional web debug console is an in-RAM ring buffer intended to replace serial monitoring when the device runs from external power. Logging is inert while disabled. Keep the buffer bounded and avoid serializing it when free heap is low: `/debuglog` should fail clearly rather than allocating a second large contiguous JSON string and taking down the web server. High-frequency traces, such as repeated successful Mifare authentication or unchanged weight readings, must be gated or rate-limited. Prefer chunked streaming if substantially more history is ever needed.
 
-Display wakes are logged once per quiet period as `Display: activity (<source>) after <n>s idle`, which names an unexpected waker directly. The console's *Backlight trace* switch (`/debuglog?bldiag=1`, reported as `blDiag`, not persisted) adds a `BL diag` line every 10 s: idle time, target and current level, and whether the display is off.
+Display wakes are logged once per quiet period as `Display: activity (<source>) after <n>s idle`, which names an unexpected waker directly. The console's *Backlight trace* switch (`/debuglog?bldiag=1`, reported as `blDiag`, not persisted) adds a `BL diag` line every 10 s: idle time, target, current and read-back level (`hw`), and whether the display is off.
 
-`/diag` switches off suspected sources of display interference one at a time, without a reflash. Nothing it sets is persisted; without parameters it returns the current state as JSON.
+`/diag` switches off suspected sources of display interference one at a time, without a reflash. Nothing it sets is persisted; without parameters it returns the current state as JSON. The response also carries `asleep` (display off), `blPwm` (LEDC attached to the pin) and `blHw` (duty read back from the LEDC channel, 256 = fully on).
 
 | Parameter | Effect |
 | --- | --- |
