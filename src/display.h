@@ -35,11 +35,16 @@ inline void displaySetBacklight(uint8_t level) {
     digitalWrite(BL_PIN, LOW);
     return;
   }
-  ledcWrite(BL_PWM_CH, level);   // duty before attach -> no stale-level flash
+  // Attach BEFORE writing the level. ledcAttachPin() re-applies the duty it reads back from
+  // the channel, and the read-back shows a new duty only from the next PWM cycle on (IDF
+  // ledc_get_duty()). Written first, the level was mostly overwritten with the old 0: after
+  // 16 of 20 wakes from "off" the channel read back duty 0 (v0.0.5). The channel was left
+  // at 0 on detach, so attaching first lights nothing before the write.
   if (!g_blPwmAttached) {
     ledcAttachPin(BL_PIN, BL_PWM_CH);
     g_blPwmAttached = true;
   }
+  ledcWrite(BL_PWM_CH, level);
 }
 
 inline bool displayInit() {

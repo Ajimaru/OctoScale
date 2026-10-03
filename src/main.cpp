@@ -1500,7 +1500,8 @@ void startWebServer() {
 
   // Flicker diagnostics: /diag?nfc=0|1&led=0|1 (0 = paused), panelsleep=1 (off =
   // DISPOFF+SLPIN instead of awake+black, applies at the next off), tx=<0.25 dBm units,
-  // 34..84> sets WiFi TX power (not persisted, clamped so the link stays up). No args -> state.
+  // 34..84> sets WiFi TX power (not persisted, clamped so the link stays up). No args -> state,
+  // plus the backlight as the hardware has it (see blHw below).
   server.on("/diag", []() {
     if (server.hasArg("nfc")) g_diagNfcPause = (server.arg("nfc") == "0");
     if (server.hasArg("led")) g_diagLedPause = (server.arg("led") == "0");
@@ -1514,6 +1515,11 @@ void startWebServer() {
     doc["led"] = !g_diagLedPause;
     doc["panelsleep"] = g_panelSleepMode;
     doc["tx"] = (int)WiFi.getTxPower();
+    // Read-only: display logically off, LEDC attached to the pin, and the duty the channel
+    // really outputs (ledcRead() reads the hardware back; 256 = fully on, see ledcWrite()).
+    doc["asleep"] = g_tftAsleep;
+    doc["blPwm"] = g_blPwmAttached;
+    doc["blHw"] = ledcRead(BL_PWM_CH);
     String out; serializeJson(doc, out);
     server.send(200, "application/json", out);
   });
@@ -4888,8 +4894,9 @@ void pn5180Task(void *param) {
       static unsigned long blDiagAt = 0;
       if (g_dbgLogEnabled && g_blDiagEnabled && millis() - blDiagAt >= 10000UL) {
         blDiagAt = millis();
-        dbgLogf("BL diag: idle=%lums target=%u cur=%u asleep=%d wantOff=%d offEn=%d offT=%us dimT=%us",
-                millis() - g_blActivity, target, blCurLevel, (int)g_tftAsleep, (int)wantOff,
+        dbgLogf("BL diag: idle=%lums target=%u cur=%u hw=%u asleep=%d wantOff=%d offEn=%d offT=%us dimT=%us",
+                millis() - g_blActivity, target, blCurLevel, (unsigned)ledcRead(BL_PWM_CH),
+                (int)g_tftAsleep, (int)wantOff,
                 (int)g_offEnabled, (unsigned)g_offTimeoutSec, (unsigned)g_blTimeoutSec);
       }
     }
