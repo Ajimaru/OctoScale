@@ -20,15 +20,16 @@ Power enters through the USB-C breakout. The 5 V rail powers the ESP32-S3, PN518
 
 Before connecting any load, feed the Mini-360 with 5 V and adjust `OUT+` to exactly 3.3 V with a multimeter.
 
-Then fit the three electrolytic capacitors. All mount with short leads directly at the points they buffer — a few centimetres of wire undoes most of the benefit — and all are polarised, so check the negative stripe before powering up.
+Then fit the four electrolytic capacitors. All mount with short leads directly at the points they buffer — a few centimetres of wire undoes most of the benefit — and all are polarised, so check the negative stripe before powering up.
 
 | Capacitor | Across | Purpose |
 | --- | --- | --- |
 | 470 uF | PN5180 `#5V` and `GND` | RF field current spikes |
 | 1500 uF | ESP32-S3 `5V` and `GND` | WiFi transmit bursts |
 | 100 uF | Mini-360 `OUT+` and `GND` | the 3.3 V rail (HX711, PN5180 logic) |
+| 220 uF | TFT `VCC` and `GND` | the TFT's 5 V input (backlight PWM) |
 
-The 470 uF one is what lets the PN5180 raise an RF field at all; without it the reader only detects tags sporadically. The other two keep the supply steady under load. Note the third sits at the **converter output**, not at the ESP32-S3's `3V3` pin — that pin is an output of the board's own regulator and feeds nothing here.
+The 470 uF one is what lets the PN5180 raise an RF field at all; without it the reader only detects tags sporadically. The others keep the supply steady under load. Note the 100 uF one sits at the **converter output**, not at the ESP32-S3's `3V3` pin — that pin is an output of the board's own regulator and feeds nothing here.
 
 > [!WARNING]
 > Never power the ESP32-S3 from USB while external 5 V is connected to its `5V`/`VBUS`/`VIN`

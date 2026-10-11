@@ -233,6 +233,8 @@ Add each OctoPrint instance with name, host, port, and API key (OctoPrint → Se
 
 Display brightness and the three idle timeouts, LED brightness, buzzer mode, and both themes. Firmware updates can be uploaded directly or pulled from a URL.
 
+The System card lists the **Reset log**: the last five restarts, each with its cause and how long the device ran before it. Red entries (Brownout, Panic, Watchdog) were unplanned; several Brownouts a few seconds apart are a power-supply loop, not a firmware fault. A dash instead of a time means the device had lost power, for example by being unplugged. **clear** empties the log; `/resetlog` holds the last 20 boots.
+
 Configuration backup exports as AES-256-CBC encrypted JSON. API keys are never written in plaintext, so a backup file is safe to keep off the device — but it is also unreadable without the passphrase, so store that somewhere durable.
 
 The file covers the whole configuration: the calibration factor, every OctoPrint instance with its database selection and selection timeout, and all device settings — display brightness and the three idle timeouts, the screensaver, both themes, buzzer mode, volume and pitch, LED brightness and routing, the debug console, and the online firmware check. Restoring applies them immediately; no reboot is needed. A setting you have never changed is left out of the file rather than exported at its current default, so restoring an old backup onto newer firmware keeps that firmware's defaults instead of freezing yesterday's. For the same reason, a backup written before a setting existed simply leaves it alone. WiFi credentials are the one exception — WiFiManager stores them separately and they are not part of the file, so a restored device still needs its network set up.
@@ -249,9 +251,9 @@ A live log of NFC reads and HTTP calls. This polls at a high rate and only runs 
 
 Almost always the power supply path, not the firmware. Check in this order:
 
-1. **Are all three capacitors fitted?** 470 µF at the PN5180, 1500 µF at the ESP32-S3 `5V` pin, 100 µF at the Mini-360 output. The 470 µF one is what lets the PN5180 raise an RF field at all; the other two absorb WiFi transmit bursts. See the [Assembly Guide](Assembly-Guide).
+1. **Are all four capacitors fitted?** 470 µF at the PN5180, 1500 µF at the ESP32-S3 `5V` pin, 100 µF at the Mini-360 output, 220 µF at the TFT `VCC`. The 470 µF one is what lets the PN5180 raise an RF field at all; the others keep the supply steady under load. See the [Assembly Guide](Assembly-Guide).
 2. **Is anything chained into the 5 V path?** USB switches, power meters, and extension cables each add contact resistance. A supply that measures a healthy 5 V at idle can still collapse under a current burst. Short, thick, and direct.
-3. **Check the reset reason** in the Debug tab. A brownout and a firmware fault look identical from the outside but report differently — the [Development Guide](Development-Guide) explains how to read it.
+3. **Check the Reset log** in the System tab. A brownout and a firmware fault look identical from the outside but report differently, and the log keeps them after the device has recovered — the [Development Guide](Development-Guide) explains how to read it.
 
 ### A tag is not recognised
 

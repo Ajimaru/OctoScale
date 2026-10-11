@@ -18,7 +18,8 @@ This guide lists the hardware to buy and the printed parts to produce before ass
 | 1 | Passive buzzer<br><a href="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/buzzer.jpg"><img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/buzzer.jpg" width="90" alt="Passive buzzer preview"></a> | Driven by LEDC PWM |
 | 1 | 470 uF electrolytic capacitor, 10 V+ | Mandatory; install at the PN5180 5 V input |
 | 1 | 1500 uF electrolytic capacitor, 10 V+ | Mandatory; buffers the ESP32-S3 board's 5 V pin |
-| 1 | 100 uF electrolytic capacitor, 16 V+ | Mandatory; buffers the Mini-360 output (3.3 V rail) |
+| 1 | 100 uF electrolytic capacitor, 10 V+ | Mandatory; buffers the Mini-360 output (3.3 V rail) |
+| 1 | 220 uF electrolytic capacitor, 10 V+ | Recommended; buffers the TFT's 5 V input at its `VCC`/`GND` pins |
 | 1 | USB-C power supply | 5 V, at least 1.5 A |
 | 1 | USB-C breakout board<br><a href="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/USB-C_breakout_board.jpg"><img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/USB-C_breakout_board.jpg" width="90" alt="USB-C breakout preview"></a> | Main 5 V entry point |
 | 1 | Mini-360 buck converter<br><a href="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/Mini-360_buck_converter.jpg"><img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/Mini-360_buck_converter.jpg" width="90" alt="Mini-360 buck converter preview"></a> | Adjust output to 3.3 V before connecting loads |

@@ -993,26 +993,41 @@ static const char INDEX_HTML[] PROGMEM =
     "}"
     "});});}"
     // ---- Debug console ----
-    "var dbgSeq=-1;"
-    "function dbgset(cb){fetch('/debuglog?on='+(cb.checked?1:0)).then(r=>r.json()).then(o=>{"
-    "document.getElementById('dbgbox').style.display=o.enabled?'':'none';"
+    // Incremental: the first fetch gets the whole buffer, every later one only the lines
+    // after dbgSeq from the same boot (/debuglog?since=&boot=, see main.cpp). The box keeps
+    // the newest 400 lines, like the device (DBGLOG_LINES in dbglog.h).
+    "var dbgSeq=-1,dbgBoot=0,dbgLines=[],dbgT=0,dbgBusy=0;"
+    "function dbgq(){return dbgSeq<0?'':'since='+dbgSeq+'&boot='+dbgBoot;}"
+    // Applies a reply only if no other reply has moved dbgSeq on since its request went
+    // out (q): two replies from the same starting point would add the same lines twice.
+    // No lines at all = the 503 a low heap answers with -> keep what is shown.
+    "function dbgshow(o,q){if(!o.lines||dbgSeq!==q)return;"
+    "if(o.full)dbgLines=[];"
+    "if(o.lost)dbgLines.push('--- '+o.lost+' lines overwritten before they could be fetched ---');"
+    "if(o.full||o.lost||o.lines.length){dbgLines=dbgLines.concat(o.lines);"
+    "if(dbgLines.length>400)dbgLines=dbgLines.slice(-400);"
+    "var b=document.getElementById('dbgbox');b.textContent=dbgLines.join('\\n');b.scrollTop=b.scrollHeight;}"
+    "dbgSeq=o.seq;dbgBoot=o.boot;}"
+    "function dbgset(cb){var q=dbgSeq;fetch('/debuglog?on='+(cb.checked?1:0)+'&'+dbgq()).then(r=>r.json()).then(o=>{"
+    "document.getElementById('dbgbox').style.display=o.enabled?'':'none';dbgshow(o,q);"
     "if(o.enabled)dbgpoll();});}"
     // Self-chaining 500ms poll -- the fastest loop in the page. Stops while the tab is
     // hidden or the user has switched to another tab (the visibilitychange handler and
     // tabRefresh at the bottom restart it on return), so neither a backgrounded window
-    // nor a switched-away debug console keeps pulling the log.
-    "function dbgpoll(){var cb=document.getElementById('dbge');if(!cb.checked)return;"
+    // nor a switched-away debug console keeps pulling the log. One request at a time
+    // (dbgBusy) and one pending timer (dbgT), however often it gets restarted.
+    "function dbgpoll(){clearTimeout(dbgT);if(dbgBusy)return;"
+    "var cb=document.getElementById('dbge');if(!cb.checked)return;"
     "if(document.hidden||currentTab!=='debug')return;"
-    "fetch('/debuglog').then(r=>r.json()).then(o=>{"
-    "if(o.seq!==dbgSeq){dbgSeq=o.seq;var b=document.getElementById('dbgbox');"
-    "b.textContent=o.lines.join('\\n');b.scrollTop=b.scrollHeight;}"
-    "setTimeout(dbgpoll,500);});}"
-    "function bldset(cb){fetch('/debuglog?bldiag='+(cb.checked?1:0));}"
-    "function dbgload(){fetch('/debuglog').then(r=>r.json()).then(o=>{"
+    "var q=dbgSeq;dbgBusy=1;fetch('/debuglog?'+dbgq()).then(r=>r.json()).then(o=>{"
+    "dbgBusy=0;dbgshow(o,q);dbgT=setTimeout(dbgpoll,500);})"
+    ".catch(()=>{dbgBusy=0;dbgT=setTimeout(dbgpoll,2000);});}"
+    "function bldset(cb){fetch('/debuglog?bldiag='+(cb.checked?1:0)+'&'+dbgq());}"
+    "function dbgload(){var q=dbgSeq;fetch('/debuglog?'+dbgq()).then(r=>r.json()).then(o=>{"
     "document.getElementById('dbge').checked=o.enabled;"
     "document.getElementById('bldg').checked=!!o.blDiag;"
     "document.getElementById('dbgbox').style.display=o.enabled?'':'none';"
-    "if(o.enabled)dbgpoll();});}"
+    "dbgshow(o,q);if(o.enabled)dbgpoll();});}"
     // ---- Load flow ----
     "var lastState='';"
     // Color CSS matching SpoolManagerExtended (_buildSpoolColorCss / spmSpoolColorCss). Code
@@ -1387,6 +1402,18 @@ static const char INDEX_HTML[] PROGMEM =
     // resets worth flagging red: anything that isn't a normal power-on or a
     // deliberate software/OTA restart -- brownout, panic, and both watchdog kinds.
     "function rrbad(n){return n===4||n===5||n===6||n===7||n===9;}"
+    // Reset history rows for the System card (/system's resetLog, newest first). Each
+    // entry is the reset that started a boot plus how long the boot before it ran, so
+    // a run of short times with Brownout is a supply loop. A dash instead of a time
+    // means the chip lost power, which also clears the RTC memory the uptime lives in.
+    "function rldur(s){return s<60?s+'s':upt(s);}"
+    "function rlrows(o){if(!o.resetLog||!o.resetLog.length)return '';"
+    "var h='<div class=\"row\"><span class=\"k\">Reset log</span><span class=\"v mono\">'+o.boots+' boots \\u00b7 "
+    "<a href=\"#\" onclick=\"return rlclear()\">clear</a></span></div>';"
+    "o.resetLog.forEach(function(e){h+='<div class=\"row\"><span class=\"k\"'+(rrbad(e.reason)?' style=\"color:#e55\"':'')+'>#'"
+    "+e.boot+' '+rrn(e.reason)+'</span><span class=\"v mono\">'+(e.prevUptime==null?'\\u2013':'after '+rldur(e.prevUptime))+'</span></div>';});"
+    "return h;}"
+    "function rlclear(){if(confirm('Clear the reset log?'))fetch('/resetlog/clear',{method:'POST'}).then(sysupd);return false;}"
     "function fwToggle(enabled){fwOnlineEnabled=enabled;"
     "fetch('/firmware/settings?enabled='+(enabled?1:0)).then(function(){"
     "if(enabled)fwupd();else{fwInfo={available:false,latestVersion:'',releaseUrl:'',error:''};sysupd();}});}"
@@ -1414,6 +1441,7 @@ static const char INDEX_HTML[] PROGMEM =
     "+(o.otaPartSize?'<div class=\"row\"><span class=\"k\">OTA partition</span><span class=\"v mono\">'+kb(o.otaPartSize)+'</span></div>':'')"
     "+'<div class=\"row\"><span class=\"k\">Tasks</span><span class=\"v mono\">'+o.taskCount+'</span></div>'"
     "+'<div class=\"row\"><span class=\"k\">Last reset</span><span class=\"v\" style=\"color:'+(rrbad(o.resetReason)?'#e55':'inherit')+'\">'+rrn(o.resetReason)+'</span></div>'"
+    "+rlrows(o)"
     "+'<div class=\"row\"><span class=\"k\">SDK</span><span class=\"v mono\">'+(o.sdkVersion||'?')+'</span></div>'"
     "+'<div class=\"row\"><span class=\"k\">Uptime</span><span class=\"v mono\">'+upt(o.uptimeSec)+'</span></div>'"
     "+'<div class=\"row\"><span class=\"k\">Firmware</span><span class=\"v mono\">v'+(o.fwVersion||'?')"

@@ -35,6 +35,7 @@
 // PN5180 NFC (SPI) + ST7789 TFT menu + EC11 encoder + buzzer.
 
 #include "dbglog.h"     // in-RAM debug log ring buffer (web UI console, see /debuglog)
+#include "resetlog.h"   // persistent reset history (see /resetlog)
 #include "version.h"    // FW_VERSION, FW_BUILD
 #include "web_ui.h"     // INDEX_HTML (web UI HTML/CSS/JS)
 #include "octoprint.h"  // OctoPrint instances + tool count/load URL/spool info
@@ -3067,14 +3068,29 @@ void startWebServer() {
       }
     }
     if (server.hasArg("bldiag")) g_blDiagEnabled = (server.arg("bldiag") == "1");
+    // ?since=<seq>&boot=<id>: only the lines after <seq>, as long as <id> is this boot's.
+    // Anything else (no since, another boot, a seq from the future) gets the whole buffer,
+    // flagged "full". The console polls every 500 ms (dbgpoll() in web_ui.h); re-sending
+    // the whole buffer each time is mostly wasted work for loop() and the WiFi stack.
+    static uint32_t bootId = 0;  // random per boot: tells a restart apart from a quiet log
+    if (!bootId) bootId = esp_random() | 1;  // first request, WiFi is up -> hardware RNG
+    uint32_t since = 0;
+    bool full = true;
+    if (server.hasArg("since") && server.arg("boot") == String(bootId)) {
+      since = strtoul(server.arg("since").c_str(), nullptr, 10);
+      full = since > g_dbgLogSeq;
+      if (full) since = 0;
+    }
     // Serializing the whole ring buffer needs a contiguous String roughly the size of
     // the buffer itself. That used to be attempted unconditionally and could fail on a
     // low heap, killing the web server outright (firmware kept running, WiFi/HTTP dead
     // until reset -- see DBGLOG_LINES' comment). Bail out with a normal HTTP error
     // instead of taking the server down: the caller sees a clear message, and the
-    // buffer stays intact for a later retry once memory frees up.
+    // buffer stays intact for a later retry once memory frees up. Only a big reply needs
+    // the margin -- a full dump or a client far behind -- so the console keeps streaming
+    // new lines on a low heap, which is when they matter most.
     uint32_t freeHeap = ESP.getFreeHeap();
-    if (freeHeap < DBGLOG_MIN_HEAP_FOR_DUMP) {
+    if ((full || g_dbgLogSeq - since > 50) && freeHeap < DBGLOG_MIN_HEAP_FOR_DUMP) {
       server.send(503, "application/json",
                   "{\"error\":\"low memory, debug log not dumped\",\"heapFree\":" +
                   String(freeHeap) + "}");
@@ -3083,13 +3099,14 @@ void startWebServer() {
     JsonDocument doc;
     doc["enabled"] = g_dbgLogEnabled;
     doc["blDiag"] = (bool)g_blDiagEnabled;
-    doc["seq"] = g_dbgLogSeq;
+    doc["boot"] = bootId;
+    doc["full"] = full;
     JsonArray lines = doc["lines"].to<JsonArray>();
-    // Oldest-to-newest: start right after the write head (that's the oldest slot).
-    for (int i = 0; i < DBGLOG_LINES; i++) {
-      String &l = g_dbgLogBuf[(g_dbgLogHead + i) % DBGLOG_LINES];
-      if (l.length()) lines.add(l);
-    }
+    uint32_t lost;
+    doc["seq"] = dbgLogRead(since, lost, [&lines](const String &l) { lines.add(l); });
+    if (lost && !full) doc["lost"] = lost;  // overwritten before this poll could fetch them
+    uint32_t dropped = __atomic_load_n(&g_dbgLogDropped, __ATOMIC_RELAXED);
+    if (dropped) doc["dropped"] = dropped;
     String out;
     serializeJson(doc, out);
     server.send(200, "application/json", out);
@@ -3151,7 +3168,11 @@ void startWebServer() {
     doc["chipRev"] = ci.revision;
     doc["chipCores"] = ci.cores;
     doc["sdkVersion"] = esp_get_idf_version();
-    doc["resetReason"] = (int)esp_reset_reason();  // 1=POWERON,3=SW,6=OTA,... (UI mappt)
+    doc["resetReason"] = (int)esp_reset_reason();  // 1=POWERON, 3=SW, 4=PANIC, 6=TASK_WDT, 9=BROWNOUT (UI maps)
+    // Reset history (see resetlog.h): total boots and the newest few entries for the
+    // System card; /resetlog has the whole ring.
+    doc["boots"] = g_resetLog.boots;
+    resetLogToJson(doc["resetLog"].to<JsonArray>(), 5);
     doc["taskCount"] = (uint32_t)uxTaskGetNumberOfTasks();
     // Pro-Core-Auslastung (Dual-Core)
     doc["core0Load"] = g_coreLoad[0];
@@ -3257,6 +3278,20 @@ void startWebServer() {
     // "request never arrived".
     delay(300);
     ESP.restart();
+  });
+
+  // Reset history (resetlog.h): GET -> {boots, entries: [{boot, reason, prevUptime}]},
+  // newest first. Clearing is POST for the same reason as /reboot.
+  server.on("/resetlog", HTTP_GET, []() {
+    JsonDocument doc;
+    doc["boots"] = g_resetLog.boots;
+    resetLogToJson(doc["entries"].to<JsonArray>(), RESETLOG_LEN);
+    String out; serializeJson(doc, out);
+    server.send(200, "application/json", out);
+  });
+  server.on("/resetlog/clear", HTTP_POST, []() {
+    resetLogClear();
+    server.send(200, "text/plain", "Reset log cleared");
   });
 
   // Web OTA from a URL: POST /updateurl?url=<http-URL-to-.bin>
@@ -3793,7 +3828,8 @@ void startScale() {
 // the point where the MCU stops functioning at all. Raising the threshold makes the
 // chip reset (and log ESP_RST_BROWNOUT, see /system's resetReason) at a higher, safer
 // voltage -- trading "never see it happen" for "always get a diagnosable reset".
-// Level is 0-7 (higher = higher trip voltage); 4 is comfortably above default without
+// On the S3 a HIGHER level is a LOWER trip voltage (IDF v4.4 esp32s3 Kconfig: 7 = 2.44 V,
+// the default; 4 = 2.84 V; 1 = 3.30 V). 4 is comfortably above default without
 // tripping on ordinary transient load (PN5180 RF field, buzzer, TFT backlight).
 static void raiseBrownoutThreshold() {
   brownout_hal_config_t cfg = {
@@ -3808,6 +3844,7 @@ static void raiseBrownoutThreshold() {
 
 void setup() {
   raiseBrownoutThreshold();
+  resetLogBoot();
   Serial.begin(115200);
   // Native USB-CDC (S3): wait for the monitor ONLY with a timeout! A bare
   // "while(!Serial)" blocks the boot forever if no serial host is connected -> the
@@ -4947,6 +4984,7 @@ void loop() {
   g_cpuBusyAccum += busy;  // average the load over a 1s window
   unsigned long now = millis();
   if (now - g_cpuWinStart >= 1000) {
+    resetLogTick();  // uptime into RTC memory, read back by the next boot's reset log
     unsigned long win = (now - g_cpuWinStart) * 1000UL;  // window length in us
     g_cpuLoad = win ? (uint8_t)min<unsigned long>(100, (g_cpuBusyAccum * 100UL) / win) : 0;
     g_cpuBusyAccum = 0;

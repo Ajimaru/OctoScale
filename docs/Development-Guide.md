@@ -108,18 +108,21 @@ The external 5 V supply powers the PN5180 RF section and TFT. A regulated 3.3 V 
 
 The PN5180 needs a 470 uF capacitor directly across its 5 V and ground pins. RF current spikes can otherwise collapse the supply and appear as a software or SPI failure. Do not power the ESP32-S3 from USB while an external 5 V supply is connected to its 5 V/VBUS/VIN input.
 
-Two more electrolytic capacitors buffer the rest of the build:
+Three more electrolytic capacitors buffer the rest of the build:
 
 | Position | Part | Buffers |
 | --- | --- | --- |
 | ESP32-S3 `5V` to `GND` | 1500 uF, 10 V+ | the board's own supply through WiFi transmit bursts |
-| Mini-360 `OUT+` to `GND` | 100 uF, 16 V+ | the 3.3 V rail feeding HX711 and PN5180 logic |
+| Mini-360 `OUT+` to `GND` | 100 uF, 10 V+ | the 3.3 V rail feeding HX711 and PN5180 logic |
+| TFT `VCC` to `GND` | 220 uF, 10 V+ | the TFT's own 5 V wire from the USB-C breakout (backlight PWM) |
 
-Mount both with short leads directly at the pins they buffer; a few centimetres of wire undoes most of the benefit. Observe polarity.
+Mount them with short leads directly at the pins they buffer; a few centimetres of wire undoes most of the benefit. Observe polarity.
 
 The 3.3 V capacitor belongs at the **converter output**, not at the ESP32-S3's `3V3` pin. That pin is an output of the board's own regulator and feeds nothing in this build — HX711 and PN5180 logic hang on the Mini-360. A large capacitance on a regulator's output also does it no favours.
 
 If the device resets unpredictably, read `resetReason` from `/system` first: value 9 is a brownout and points at the supply path rather than at firmware. Prefer a short, thick, direct connection, and put any remote power switching on the mains side of the 5 V supply rather than in the low-voltage path.
+
+`resetReason` only reports the last reset. `/resetlog` keeps the last 20 boots in NVS, each with its reset reason and how long the boot before it ran, so a brownout loop that has settled again is still visible; the System card shows the newest five. The uptime survives in RTC memory, which a real power loss clears, so power-on entries usually carry no uptime. `POST /resetlog/clear` empties the log.
 
 ## Input handling
 
@@ -193,6 +196,8 @@ The TFT has four important takeover screens: the boot splash, the idle logo scre
 ## Debug console and memory
 
 The optional web debug console is an in-RAM ring buffer intended to replace serial monitoring when the device runs from external power. Logging is inert while disabled. Keep the buffer bounded and avoid serializing it when free heap is low: `/debuglog` should fail clearly rather than allocating a second large contiguous JSON string and taking down the web server. High-frequency traces, such as repeated successful Mifare authentication or unchanged weight readings, must be gated or rate-limited. Prefer chunked streaming if substantially more history is ever needed.
+
+Lines come from tasks on both cores while `/debuglog` reads. A mutex guards the buffer and is taken per line, so a writer never waits for a whole dump and a waiting task sleeps instead of spinning. The console polls incrementally with `/debuglog?since=<seq>&boot=<id>` and gets only the newer lines of the same boot; without these parameters, or after a restart, the reply is the whole buffer with `full: true`. `lost` counts lines overwritten before a poll fetched them, `dropped` lines a writer gave up on after a 10 ms lock timeout. The low-heap refusal applies only to large replies.
 
 Display wakes are logged once per quiet period as `Display: activity (<source>) after <n>s idle`, which names an unexpected waker directly. The console's *Backlight trace* switch (`/debuglog?bldiag=1`, reported as `blDiag`, not persisted) adds a `BL diag` line every 10 s: idle time, target, current and read-back level (`hw`), and whether the display is off.
 
@@ -279,8 +284,8 @@ OctoPrint communication goes through the SpoolManagerExtended HTTP bridge. API k
 1. Confirm the selected PlatformIO environment matches the board memory configuration.
 2. Disconnect external power before USB flashing.
 3. Close serial monitors before uploading.
-4. Verify the PN5180 has external 5 V, common ground, and the local 470 uF capacitor, and that the board's 5 V pin and the converter output are buffered.
-5. For unexplained resets, read `resetReason` from `/system` before suspecting firmware: 9 is a brownout and points at the supply path, 6 is a task watchdog, 1 is a normal power-on.
+4. Verify the PN5180 has external 5 V, common ground, and the local 470 uF capacitor, and that the board's 5 V pin, the TFT's `VCC` and the converter output are buffered.
+5. For unexplained resets, read `resetReason` from `/system` before suspecting firmware: 9 is a brownout and points at the supply path, 6 is a task watchdog, 1 is a normal power-on. `/resetlog` has the history of the last 20 boots.
 6. Confirm PN5180 and TFT are on separate SPI buses.
 7. Check the serial console for boot progress and WiFi/AP status.
 8. Use the web UI diagnostics for HX711 readiness, raw value, noise, system metrics, and debug logging.
