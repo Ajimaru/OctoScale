@@ -1402,6 +1402,18 @@ static const char INDEX_HTML[] PROGMEM =
     // resets worth flagging red: anything that isn't a normal power-on or a
     // deliberate software/OTA restart -- brownout, panic, and both watchdog kinds.
     "function rrbad(n){return n===4||n===5||n===6||n===7||n===9;}"
+    // Reset history rows for the System card (/system's resetLog, newest first). Each
+    // entry is the reset that started a boot plus how long the boot before it ran, so
+    // a run of short times with Brownout is a supply loop. A dash instead of a time
+    // means the chip lost power, which also clears the RTC memory the uptime lives in.
+    "function rldur(s){return s<60?s+'s':upt(s);}"
+    "function rlrows(o){if(!o.resetLog||!o.resetLog.length)return '';"
+    "var h='<div class=\"row\"><span class=\"k\">Reset log</span><span class=\"v mono\">'+o.boots+' boots \\u00b7 "
+    "<a href=\"#\" onclick=\"return rlclear()\">clear</a></span></div>';"
+    "o.resetLog.forEach(function(e){h+='<div class=\"row\"><span class=\"k\"'+(rrbad(e.reason)?' style=\"color:#e55\"':'')+'>#'"
+    "+e.boot+' '+rrn(e.reason)+'</span><span class=\"v mono\">'+(e.prevUptime==null?'\\u2013':'after '+rldur(e.prevUptime))+'</span></div>';});"
+    "return h;}"
+    "function rlclear(){if(confirm('Clear the reset log?'))fetch('/resetlog/clear',{method:'POST'}).then(sysupd);return false;}"
     "function fwToggle(enabled){fwOnlineEnabled=enabled;"
     "fetch('/firmware/settings?enabled='+(enabled?1:0)).then(function(){"
     "if(enabled)fwupd();else{fwInfo={available:false,latestVersion:'',releaseUrl:'',error:''};sysupd();}});}"
@@ -1429,6 +1441,7 @@ static const char INDEX_HTML[] PROGMEM =
     "+(o.otaPartSize?'<div class=\"row\"><span class=\"k\">OTA partition</span><span class=\"v mono\">'+kb(o.otaPartSize)+'</span></div>':'')"
     "+'<div class=\"row\"><span class=\"k\">Tasks</span><span class=\"v mono\">'+o.taskCount+'</span></div>'"
     "+'<div class=\"row\"><span class=\"k\">Last reset</span><span class=\"v\" style=\"color:'+(rrbad(o.resetReason)?'#e55':'inherit')+'\">'+rrn(o.resetReason)+'</span></div>'"
+    "+rlrows(o)"
     "+'<div class=\"row\"><span class=\"k\">SDK</span><span class=\"v mono\">'+(o.sdkVersion||'?')+'</span></div>'"
     "+'<div class=\"row\"><span class=\"k\">Uptime</span><span class=\"v mono\">'+upt(o.uptimeSec)+'</span></div>'"
     "+'<div class=\"row\"><span class=\"k\">Firmware</span><span class=\"v mono\">v'+(o.fwVersion||'?')"

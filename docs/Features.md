@@ -34,6 +34,7 @@ Foreign tags such as Snapmaker tags fall back to a UID lookup in SpoolManagerExt
 - Web UI covers weighing, calibration, NFC, OctoPrint instances, system, WiFi, and test points.
 - Passive buzzer with event tones and mirrored onboard/external WS2812 status LEDs.
 - Optional browser debug console for NFC and HTTP activity.
+- Reset log of the last 20 boots with cause and previous uptime, so brownout loops stay visible after the device recovers.
 - WiFiManager provisioning with AP fallback and captive portal.
 - OTA through `espota` or web upload/URL update.
 - Multiple OctoPrint instances with database failover when instances share an external database.
