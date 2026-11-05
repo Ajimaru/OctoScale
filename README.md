@@ -23,7 +23,7 @@
 [badge-pio]: https://img.shields.io/badge/PlatformIO-Arduino-orange.svg?style=flat-square&logo=platformio&logoColor=white
 [badge-release]: https://img.shields.io/github/v/release/Ajimaru/OctoScale?style=flat-square&logo=git&logoColor=white
 [badge-downloads]: https://img.shields.io/github/downloads/Ajimaru/OctoScale/total.svg?style=flat-square&logo=github&logoColor=white
-[badge-love]: https://img.shields.io/badge/made_with-%E2%9D%A4%EF%B8%8F-ff69b4?style=flat-square&logo=heart&logoColor=white
+[badge-love]: https://img.shields.io/badge/made_with-%E2%9D%A4%EF%B8%8F-ff69b4?style=flat-square
 
 > [!WARNING]
 > Database features require [OctoPrint-SpoolManagerExtended](https://github.com/Ajimaru/OctoPrint-SpoolManagerExtended).
