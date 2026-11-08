@@ -1598,9 +1598,12 @@ inline String pn5180NtagOccupancy() {
   if (pn5180NtagCcIsVirgin(cc, alreadyNdef)) return "empty";  // never written
   // A formatted-but-unused NDEF tag reads as an empty TLV: 0x03 0x00 (message of
   // length zero) or a plain 0x00/0xFE terminator right at the start of the user area.
+  // 0x03 0xFF 0x00 0x00 is the same empty message in the 3-byte length form -- what an
+  // interrupted long-form OpenSpool or OpenPrintTag write leaves behind.
   if (alreadyNdef) {
     const uint8_t *u = pages + 4 * 4;
-    bool emptyMsg = (u[0] == 0x00) || (u[0] == 0xFE) || (u[0] == 0x03 && u[1] == 0x00);
+    bool emptyMsg = (u[0] == 0x00) || (u[0] == 0xFE) || (u[0] == 0x03 && u[1] == 0x00) ||
+                    (u[0] == 0x03 && u[1] == 0xFF && u[2] == 0x00 && u[3] == 0x00);
     return emptyMsg ? "empty" : "foreign";
   }
   return "foreign";  // non-virgin, non-NDEF CC -> somebody else formatted this
@@ -1635,7 +1638,8 @@ inline String pn5180NfcvOccupancy(const uint8_t uid[8]) {
     uint8_t first[4];
     if (!pn5180NfcvReadBlock(uid, 1, first)) return "";
     bool emptyMsg = (first[0] == 0x00) || (first[0] == 0xFE) ||
-                    (first[0] == 0x03 && first[1] == 0x00);
+                    (first[0] == 0x03 && first[1] == 0x00) ||
+                    (first[0] == 0x03 && first[1] == 0xFF && first[2] == 0x00 && first[3] == 0x00);
     return emptyMsg ? "empty" : "foreign";
   }
   return "foreign";  // non-virgin, non-NDEF CC -> somebody else formatted this
@@ -2415,14 +2419,25 @@ inline bool pn5180ReadMifareExtended(const String &uidHex, SpoolTagData &out) {
 }
 
 // --- NTAG OpenSpool (NDEF) (C.2) -----------------------------------------------
-// NDEF frame: TLV 0x03 <len> <message> 0xFE (terminator). Message = one short record:
-// header 0xD2 (MB=1,ME=1,SR=1,TNF=0x02 MIME-type), type-length (1 B), payload-length
-// (1 B, SR=short record), type "application/json" (16 B), then the JSON payload.
-// Record header overhead = 1(header)+1(typeLen)+1(payloadLen)+16(type) = 19 B.
-// TLV overhead = 1(tag)+1(len)+1(terminator) = 3 B (assuming payload+record < 255 B,
-// true for anything that fits an NTAG213/215/216 anyway -- no 3-byte-length TLV path).
-// Total fixed overhead = 22 B, matching the plan.
+// NDEF frame: TLV 0x03 <len> <message> 0xFE (terminator). Message = one MIME record,
+// type "application/json" (16 B), then the JSON payload. Two framings, by JSON size:
+//   short: TLV 0x03 <len:1>, record header 0xD2 (MB|ME|SR|TNF=MIME), typeLen,
+//          payloadLen:1 -> 22 B around the JSON. What every earlier firmware wrote, and
+//          still used whenever the JSON fits it.
+//   long:  TLV 0x03 0xFF <len:2>, record header 0xC2 (SR clear), typeLen, payloadLen:4
+//          -> 27 B around the JSON.
+// Same rule as openprinttag.h's writer. The short form ends at 235 B of JSON, and a full
+// spool record with extra colours on an NTAG215/216 needs more than that.
 static const char NDEF_MIME_TYPE[] = "application/json";  // 16 bytes, no NUL counted
+
+// Largest JSON the short form can carry. Its TLV length byte holds the whole message
+// (19 B record overhead + payload) and must stay <= 0xFE: 0xFF announces the 3-byte
+// length form, so every other NDEF reader would misparse such a tag.
+static const int OPENSPOOL_MAX_PAYLOAD = 0xFE - 19;  // 235 B
+static const int OPENSPOOL_SHORT_OVERHEAD = 22;
+static const int OPENSPOOL_LONG_OVERHEAD = 27;
+// Readers' upper bound for a JSON in the long form; NTAG216's whole user area is 888 B.
+static const int OPENSPOOL_MAX_READ_PAYLOAD = 1024;
 
 // Builds the OpenSpool JSON payload (spec fields + the os_db_id extension), applying
 // progressive field-dropping from the back of the priority list if the full JSON
@@ -2465,6 +2480,21 @@ inline String pn5180BuildOpenSpoolJson(const SpoolTagData &d, int budgetBytes, S
       colorHex = hx;
     }
   }
+  // Colours 2-3 of a multi-colour spool go into additional_color_hexes, same 6-digit form
+  // as color_hex. The key is not in the OpenSpool spec itself: the SnapmakerU1-Extended-
+  // Firmware documents it ("Additional colors for multicolor spools (up to 4)"), and its
+  // own reader as well as SpoolManagerExtended's read it. Readers append these entries to
+  // color_hex, so they are only written next to a primary colour.
+  String extraHexes = "";
+  if (colorHex.length() > 0 && d.colorCount > 1) {
+    char hx[16];
+    for (int i = 1; i < d.colorCount && i < 3; i++) {
+      snprintf(hx, sizeof(hx), "%s\"%02X%02X%02X\"", i > 1 ? "," : "",
+               d.colorRgb[i][0], d.colorRgb[i][1], d.colorRgb[i][2]);
+      extraHexes += hx;
+    }
+    extraHexes = "[" + extraHexes + "]";
+  }
 
   Field fields[] = {
     { "\"protocol\"",     "\"openspool\"", false, true },
@@ -2479,6 +2509,9 @@ inline String pn5180BuildOpenSpoolJson(const SpoolTagData &d, int budgetBytes, S
     { "\"max_temp\"",     String(hotMax),    false, d.temperatureMax >= 0 },
     { "\"bed_min_temp\"", String(bedMin),    false, d.bedTemperatureMin >= 0 },
     { "\"bed_max_temp\"", String(bedMax),    false, d.bedTemperatureMax >= 0 },
+    // Last, so the extra colours are the first thing a small tag drops -- every field
+    // above survives exactly as it did before this key existed.
+    { "\"additional_color_hexes\"", extraHexes, false, extraHexes.length() > 0 },
   };
   const int n = sizeof(fields) / sizeof(fields[0]);
   bool include[n];
@@ -2522,8 +2555,86 @@ inline bool pn5180NtagCcIsVirgin(const uint8_t cc[4], bool &alreadyNdefOut) {
   return cc[0] == 0 && cc[1] == 0 && cc[2] == 0 && cc[3] == 0;
 }
 
-// Writes the OpenSpool NDEF message. Length-then-message ordering: the TLV length byte
-// is written as 0x00 FIRST, the actual message pages after, and the real length is
+// JSON budget for userBytes of NDEF space (CC excluded). Uses the long form's overhead
+// only where the short form's budget would exceed OPENSPOOL_MAX_PAYLOAD.
+// pn5180BuildOpenSpoolFrame then picks the form by the JSON's actual length, so a JSON
+// that fits the short form is still written in it.
+inline int pn5180OpenSpoolBudget(int userBytes) {
+  int budget = userBytes - OPENSPOOL_SHORT_OVERHEAD;
+  if (budget > OPENSPOOL_MAX_PAYLOAD) budget = userBytes - OPENSPOOL_LONG_OVERHEAD;
+  return budget;
+}
+
+// Frame for the OpenSpool JSON, laid out from the first NDEF page/block on: TLV header,
+// record, terminator, zero-padded to whole 4-byte units. The TLV length is left at zero
+// (an empty NDEF message); the caller writes the real one LAST with
+// pn5180PatchOpenSpoolLength, see the length-then-message comment below. Returns nullptr
+// when out of memory; the caller frees the buffer.
+inline uint8_t *pn5180BuildOpenSpoolFrame(const String &json, int &totalLenOut, int &msgLenOut,
+                                          bool &longFormOut) {
+  const int typeLen = (int)strlen(NDEF_MIME_TYPE);
+  const int payloadLen = json.length();
+  const bool longForm = payloadLen > OPENSPOOL_MAX_PAYLOAD;
+  const int msgLen = (longForm ? 6 : 3) + typeLen + payloadLen;  // record header + type + JSON
+  const int totalLen = (((longForm ? 4 : 2) + msgLen + 1 + 3) / 4) * 4;  // + TLV header, terminator
+  uint8_t *buf = (uint8_t *)calloc(totalLen, 1);
+  if (!buf) return nullptr;
+  int p = 0;
+  buf[p++] = 0x03;  // TLV tag = NDEF message
+  if (longForm) { buf[p++] = 0xFF; buf[p++] = 0x00; buf[p++] = 0x00; }  // length 0 until patched
+  else buf[p++] = 0x00;
+  buf[p++] = longForm ? 0xC2 : 0xD2;  // record header: MB|ME|[SR]|TNF=MIME
+  buf[p++] = (uint8_t)typeLen;
+  if (longForm) {
+    buf[p++] = (uint8_t)(payloadLen >> 24); buf[p++] = (uint8_t)(payloadLen >> 16);
+    buf[p++] = (uint8_t)(payloadLen >> 8);  buf[p++] = (uint8_t)payloadLen;
+  } else {
+    buf[p++] = (uint8_t)payloadLen;
+  }
+  memcpy(buf + p, NDEF_MIME_TYPE, typeLen); p += typeLen;
+  memcpy(buf + p, json.c_str(), payloadLen); p += payloadLen;
+  buf[p] = 0xFE;  // terminator TLV
+  totalLenOut = totalLen; msgLenOut = msgLen; longFormOut = longForm;
+  return buf;
+}
+
+// Sets the real message length in the frame's first 4 bytes -- the first page/block,
+// which holds the whole TLV header in either form.
+inline void pn5180PatchOpenSpoolLength(uint8_t first[4], int msgLen, bool longForm) {
+  if (longForm) { first[1] = 0xFF; first[2] = (uint8_t)(msgLen >> 8); first[3] = (uint8_t)msgLen; }
+  else first[1] = (uint8_t)msgLen;
+}
+
+// Finds the JSON in an OpenSpool frame from its first 12 bytes (enough for the long TLV
+// plus the long record header). Accepts both forms pn5180BuildOpenSpoolFrame writes and
+// nothing else: TLV 0x03, then one MIME record without ID field, type length 16.
+inline bool pn5180LocateOpenSpoolJson(const uint8_t hdr[12], int &jsonOffOut, int &jsonLenOut) {
+  if (hdr[0] != 0x03) return false;  // no NDEF TLV -> not an OpenSpool tag
+  const bool longTlv = (hdr[1] == 0xFF);
+  const int msgLen = longTlv ? ((hdr[2] << 8) | hdr[3]) : hdr[1];
+  if (msgLen == 0) return false;  // empty/aborted-write placeholder, not a real record
+  int p = longTlv ? 4 : 2;
+  const uint8_t recHdr = hdr[p];
+  if (recHdr != 0xD2 && recHdr != 0xC2) return false;  // not our MIME record shape
+  const uint8_t typeLen = hdr[p + 1];
+  uint32_t payloadLen;
+  if (recHdr == 0xD2) {
+    payloadLen = hdr[p + 2];
+    p += 3;
+  } else {
+    payloadLen = ((uint32_t)hdr[p + 2] << 24) | ((uint32_t)hdr[p + 3] << 16) |
+                 ((uint32_t)hdr[p + 4] << 8) | hdr[p + 5];
+    p += 6;
+  }
+  if (typeLen != 16 || payloadLen == 0 || payloadLen > (uint32_t)OPENSPOOL_MAX_READ_PAYLOAD) return false;
+  jsonOffOut = p + typeLen;
+  jsonLenOut = (int)payloadLen;
+  return true;
+}
+
+// Writes the OpenSpool NDEF message. Length-then-message ordering: the TLV length is
+// written as zero FIRST (0x00, or 0xFF 0x00 0x00 in the long form), the actual message
+// pages after, and the real length is
 // patched in LAST -- an aborted write then reads back as an empty (harmless) NDEF
 // message, never a corrupt one with a length pointing past valid data.
 // CC (page 3) is written only if virgin; if it already looks like a valid NDEF CC, it's
@@ -2549,19 +2660,12 @@ inline bool pn5180WriteNtagOpenSpool(const SpoolTagData &d, String &droppedField
 
   NtagVariant variant = pn5180NtagGetVersion();
   int userBytes = ntagUserBytes(variant);
-  int budget = userBytes - 22;  // 22 B fixed NDEF/record overhead (see above)
+  int budget = pn5180OpenSpoolBudget(userBytes);
   dbgLogf("NTAG OpenSpool write: variant=%s userBytes=%d jsonBudget=%d", ntagVariantName(variant), userBytes, budget);
 
   String json = pn5180BuildOpenSpoolJson(d, budget, droppedFieldsOut);
   if (json.length() == 0) {
     errOut = "spool data too large even after dropping optional fields";
-    g_pn5180->reset(); g_pn5180->setupRF();
-    return false;
-  }
-  int payloadLen = json.length();
-  int msgLen = 1 + 1 + 1 + 16 + payloadLen;  // header+typeLen+payloadLen+type+json
-  if (msgLen > 255) {  // stay in the short-TLV-length path (1-byte length)
-    errOut = "NDEF message too large for this tag";
     g_pn5180->reset(); g_pn5180->setupRF();
     return false;
   }
@@ -2577,20 +2681,13 @@ inline bool pn5180WriteNtagOpenSpool(const SpoolTagData &d, String &droppedField
     return false;
   }
 
-  // Build the full page buffer: TLV(len=0 placeholder) + message, page-aligned (pad
-  // with 0x00 to a 4-byte boundary; the terminator 0xFE follows the real message).
-  int bodyLen = 2 + msgLen + 1;  // TLV tag+len(placeholder) + message + terminator
-  int totalLen = ((bodyLen + 3) / 4) * 4;
-  uint8_t *buf = (uint8_t *)calloc(totalLen, 1);
+  // Full page buffer: TLV with length 0 as placeholder, the record, the terminator,
+  // padded to whole pages (see pn5180BuildOpenSpoolFrame).
+  int totalLen = 0, msgLen = 0;
+  bool longForm = false;
+  uint8_t *buf = pn5180BuildOpenSpoolFrame(json, totalLen, msgLen, longForm);
   if (!buf) { errOut = "out of memory"; g_pn5180->reset(); g_pn5180->setupRF(); return false; }
-  buf[0] = 0x03; buf[1] = 0x00;  // TLV tag=NDEF message, len=0 (placeholder, patched last)
-  int p = 2;
-  buf[p++] = 0xD2;                          // record header: MB|ME|SR|TNF=MIME
-  buf[p++] = (uint8_t)strlen(NDEF_MIME_TYPE);  // type length
-  buf[p++] = (uint8_t)payloadLen;              // payload length (short record)
-  memcpy(buf + p, NDEF_MIME_TYPE, strlen(NDEF_MIME_TYPE)); p += strlen(NDEF_MIME_TYPE);
-  memcpy(buf + p, json.c_str(), payloadLen); p += payloadLen;
-  buf[p++] = 0xFE;  // terminator TLV
+  dbgLogf("NTAG OpenSpool write: json=%d B, %s form", (int)json.length(), longForm ? "long" : "short");
 
   // Write CC first (if needed), THEN the message pages with length=0, THEN patch the
   // real length into page 4 last -- an interrupted write anywhere before the final
@@ -2608,7 +2705,7 @@ inline bool pn5180WriteNtagOpenSpool(const SpoolTagData &d, String &droppedField
   if (ok) {
     uint8_t lenPage[4];
     if (pn5180NtagReadPages(pageIdx, 1, lenPage)) {
-      lenPage[1] = (uint8_t)msgLen;  // patch the real length into the already-written page
+      pn5180PatchOpenSpoolLength(lenPage, msgLen, longForm);  // real length into the written page
       ok = pn5180NtagWritePage(pr.uid, pageIdx, lenPage, /*reselect=*/true, errOut);
     } else { ok = false; errOut = "length-patch read failed"; }
   }
@@ -2619,43 +2716,65 @@ inline bool pn5180WriteNtagOpenSpool(const SpoolTagData &d, String &droppedField
   return ok;
 }
 
+// OpenSpool colour value -> RGB. OctoScale writes "RRGGBB"; foreign tags may carry
+// "#RRGGBB" (the SnapmakerU1-Extended-Firmware docs use that form). As with
+// pn5180ParseColorHex, anything after the third byte-pair (an "RRGGBBAA" alpha) is ignored.
+inline bool pn5180ParseOpenSpoolHex(const char *s, uint8_t rgbOut[3]) {
+  if (!s) return false;
+  if (s[0] == '#') s++;
+  return pn5180ParseColorHex(String("#") + s, rgbOut);
+}
+
+// Colour part of an OpenSpool read, shared by the NTAG and NFC-V readers.
+inline void pn5180ReadOpenSpoolColors(const JsonDocument &doc, SpoolTagData &out) {
+  // OpenSpool encodes "no colour" by omitting the key, so a present "000000" is
+  // black -- no zero-check here. colorCount is set so colorFull carries it too, but
+  // only if the hex actually parses: color_hex is arbitrary JSON and may be junk.
+  const char *ch = doc["color_hex"] | "";
+  if (ch && ch[0]) {
+    if (ch[0] == '#') ch++;  // "#RRGGBB" became "##RRGGBB" here and never parsed
+    out.color = String("#") + ch;
+    if (pn5180ParseColorHex(out.color, out.colorRgb[0])) out.colorCount = 1;
+  }
+  // Colours 2-3 from additional_color_hexes (see pn5180BuildOpenSpoolJson), only next to
+  // a parsed primary colour. Same rule as SpoolManagerExtended's parser: the first four
+  // entries count, and one that is not a hex string is skipped. This is not only for
+  // display: flowDoWeighSave rewrites an OpenSpool tag from exactly this data after a
+  // weighing, so a colour not read back here would be gone from the tag afterwards.
+  if (out.colorCount != 1) return;
+  int seen = 0;
+  for (JsonVariantConst v : doc["additional_color_hexes"].as<JsonArrayConst>()) {
+    if (seen++ >= 4 || out.colorCount >= 3) break;
+    if (v.is<const char *>() && pn5180ParseOpenSpoolHex(v.as<const char *>(), out.colorRgb[out.colorCount]))
+      out.colorCount++;
+  }
+}
+
 // Reads back an OpenSpool NDEF tag. Only parses the fields OctoScale itself cares
 // about (os_db_id primarily, plus enough to display what's on the tag) -- a full JSON
 // parse via ArduinoJson, since the payload is small and this path isn't hot (once per
 // tag-present event, not per poll).
 inline bool pn5180ReadNtagOpenSpool(SpoolTagData &out) {
   out = SpoolTagData();
-  uint8_t hdr[8];  // pages 4-5: TLV tag/len + record header/typeLen/payloadLen
-  if (!pn5180NtagReadPages(4, 2, hdr)) return false;
-  if (hdr[0] != 0x03) return false;  // no NDEF TLV -> not an OpenSpool tag
-  uint8_t msgLen = hdr[1];
-  if (msgLen == 0) return false;  // empty/aborted-write placeholder, not a real record
-  if (hdr[2] != 0xD2) return false;  // not our short MIME record shape
-  uint8_t typeLen = hdr[3];
-  uint8_t payloadLen = hdr[4];
-  if (typeLen != 16 || payloadLen == 0 || payloadLen > 220) return false;
+  uint8_t hdr[12];  // pages 4-6: TLV header + record header, long forms included
+  if (!pn5180NtagReadPages(4, 3, hdr)) return false;
+  int jsonOff = 0, jsonLen = 0;
+  if (!pn5180LocateOpenSpoolJson(hdr, jsonOff, jsonLen)) return false;
 
-  int totalNeeded = 2 + 3 + typeLen + payloadLen;  // TLV hdr + record hdr + type + payload
-  int pagesNeeded = (totalNeeded + 3) / 4 + 1;      // +1 rounding margin
+  int totalNeeded = jsonOff + jsonLen;          // from the TLV tag to the end of the JSON
+  int pagesNeeded = (totalNeeded + 3) / 4 + 1;  // +1 rounding margin
   uint8_t *buf = (uint8_t *)malloc(pagesNeeded * 4);
   if (!buf) return false;
   bool ok = pn5180NtagReadPages(4, pagesNeeded, buf);
   if (ok) {
-    const char *jsonStart = (const char *)(buf + 2 + 3 + typeLen);
+    const char *jsonStart = (const char *)(buf + jsonOff);
     JsonDocument doc;
-    if (!deserializeJson(doc, jsonStart, payloadLen)) {
+    if (!deserializeJson(doc, jsonStart, jsonLen)) {
       if (doc["os_db_id"].is<long>() || doc["os_db_id"].is<const char*>())
         out.databaseId = doc["os_db_id"] | -1L;
       out.material = String((const char *)(doc["type"] | ""));
       out.vendor = String((const char *)(doc["brand"] | ""));
-      const char *ch = doc["color_hex"] | "";
-      // OpenSpool encodes "no colour" by omitting the key, so a present "000000" is
-      // black -- no zero-check here. colorCount is set so colorFull carries it too, but
-      // only if the hex actually parses: color_hex is arbitrary JSON and may be junk.
-      if (ch && ch[0]) {
-        out.color = String("#") + ch;
-        if (pn5180ParseColorHex(out.color, out.colorRgb[0])) out.colorCount = 1;
-      }
+      pn5180ReadOpenSpoolColors(doc, out);
       float w = doc["weight"] | -1.0f; if (w > 0) out.totalWeight = w;
       float dia = doc["diameter"] | -1.0f; if (dia > 0) out.diameter = dia;
       int mn = doc["min_temp"] | -1; if (mn >= 0) out.temperatureMin = mn;
@@ -3620,18 +3739,12 @@ inline bool pn5180WriteNfcvOpenSpool(const uint8_t uid[8], const SpoolTagData &d
 
   uint8_t bs = 0, nb = 0;
   int userBytes = pn5180NfcvUserBytes(uid, &bs, &nb);
-  const int budget = userBytes - 4 /* CC block */ - 22 /* NDEF/record overhead */;
+  int budget = pn5180OpenSpoolBudget(userBytes - 4 /* CC block */);
   dbgLogf("NFC-V OpenSpool write: userBytes=%d (bs=%u nb=%u) jsonBudget=%d", userBytes, bs, nb, budget);
 
   String json = pn5180BuildOpenSpoolJson(d, budget, droppedFieldsOut);
   if (json.length() == 0) {
     errOut = "spool data too large even after dropping optional fields";
-    return false;
-  }
-  int payloadLen = json.length();
-  int msgLen = 1 + 1 + 1 + 16 + payloadLen;  // header+typeLen+payloadLen+type+json
-  if (msgLen > 255) {
-    errOut = "NDEF message too large for this tag";
     return false;
   }
 
@@ -3644,18 +3757,11 @@ inline bool pn5180WriteNfcvOpenSpool(const uint8_t uid[8], const SpoolTagData &d
     return false;
   }
 
-  int bodyLen = 2 + msgLen + 1;  // TLV tag+len(placeholder) + message + terminator
-  int totalLen = ((bodyLen + 3) / 4) * 4;  // pad to a 4-byte block boundary
-  uint8_t *buf = (uint8_t *)calloc(totalLen, 1);
+  int totalLen = 0, msgLen = 0;
+  bool longForm = false;
+  uint8_t *buf = pn5180BuildOpenSpoolFrame(json, totalLen, msgLen, longForm);
   if (!buf) { errOut = "out of memory"; return false; }
-  buf[0] = 0x03; buf[1] = 0x00;  // TLV tag=NDEF message, len=0 (placeholder, patched last)
-  int p = 2;
-  buf[p++] = 0xD2;                             // record header: MB|ME|SR|TNF=MIME
-  buf[p++] = (uint8_t)strlen(NDEF_MIME_TYPE);  // type length
-  buf[p++] = (uint8_t)payloadLen;              // payload length (short record)
-  memcpy(buf + p, NDEF_MIME_TYPE, strlen(NDEF_MIME_TYPE)); p += strlen(NDEF_MIME_TYPE);
-  memcpy(buf + p, json.c_str(), payloadLen); p += payloadLen;
-  buf[p++] = 0xFE;  // terminator TLV
+  dbgLogf("NFC-V OpenSpool write: json=%d B, %s form", (int)json.length(), longForm ? "long" : "short");
 
   bool ok = true;
   if (virgin) {
@@ -3669,7 +3775,7 @@ inline bool pn5180WriteNfcvOpenSpool(const uint8_t uid[8], const SpoolTagData &d
   if (ok) {
     uint8_t lenBlock[4];
     if (pn5180NfcvReadBlock(uid, NFCV_OS_NDEF_BLOCK, lenBlock)) {
-      lenBlock[1] = (uint8_t)msgLen;  // patch the real length into the already-written block
+      pn5180PatchOpenSpoolLength(lenBlock, msgLen, longForm);  // real length into the written block
       ok = pn5180NfcvWriteBlock(uid, NFCV_OS_NDEF_BLOCK, lenBlock, errOut);
     } else { ok = false; errOut = "length-patch read failed"; }
   }
@@ -3683,18 +3789,14 @@ inline bool pn5180WriteNfcvOpenSpool(const uint8_t uid[8], const SpoolTagData &d
 // JSON schema) -- only the block-read plumbing differs.
 inline bool pn5180ReadNfcvOpenSpool(const uint8_t uid[8], SpoolTagData &out) {
   out = SpoolTagData();
-  uint8_t hdr[8];  // blocks 1-2: TLV tag/len + record header/typeLen/payloadLen
+  uint8_t hdr[12];  // blocks 1-3: TLV header + record header, long forms included
   if (!pn5180NfcvReadBlock(uid, NFCV_OS_NDEF_BLOCK, hdr) ||
-      !pn5180NfcvReadBlock(uid, NFCV_OS_NDEF_BLOCK + 1, hdr + 4)) return false;
-  if (hdr[0] != 0x03) return false;  // no NDEF TLV -> not an OpenSpool tag
-  uint8_t msgLen = hdr[1];
-  if (msgLen == 0) return false;  // empty/aborted-write placeholder, not a real record
-  if (hdr[2] != 0xD2) return false;  // not our short MIME record shape
-  uint8_t typeLen = hdr[3];
-  uint8_t payloadLen = hdr[4];
-  if (typeLen != 16 || payloadLen == 0 || payloadLen > 220) return false;
+      !pn5180NfcvReadBlock(uid, NFCV_OS_NDEF_BLOCK + 1, hdr + 4) ||
+      !pn5180NfcvReadBlock(uid, NFCV_OS_NDEF_BLOCK + 2, hdr + 8)) return false;
+  int jsonOff = 0, jsonLen = 0;
+  if (!pn5180LocateOpenSpoolJson(hdr, jsonOff, jsonLen)) return false;
 
-  int totalNeeded = 2 + 3 + typeLen + payloadLen;
+  int totalNeeded = jsonOff + jsonLen;           // from the TLV tag to the end of the JSON
   int blocksNeeded = (totalNeeded + 3) / 4 + 1;  // +1 rounding margin
   uint8_t *buf = (uint8_t *)malloc(blocksNeeded * 4);
   if (!buf) return false;
@@ -3702,21 +3804,14 @@ inline bool pn5180ReadNfcvOpenSpool(const uint8_t uid[8], SpoolTagData &out) {
   for (int i = 0; i < blocksNeeded && ok; i++)
     ok = pn5180NfcvReadBlock(uid, NFCV_OS_NDEF_BLOCK + i, buf + i * 4);
   if (ok) {
-    const char *jsonStart = (const char *)(buf + 2 + 3 + typeLen);
+    const char *jsonStart = (const char *)(buf + jsonOff);
     JsonDocument doc;
-    if (!deserializeJson(doc, jsonStart, payloadLen)) {
+    if (!deserializeJson(doc, jsonStart, jsonLen)) {
       if (doc["os_db_id"].is<long>() || doc["os_db_id"].is<const char*>())
         out.databaseId = doc["os_db_id"] | -1L;
       out.material = String((const char *)(doc["type"] | ""));
       out.vendor = String((const char *)(doc["brand"] | ""));
-      const char *ch = doc["color_hex"] | "";
-      // OpenSpool encodes "no colour" by omitting the key, so a present "000000" is
-      // black -- no zero-check here. colorCount is set so colorFull carries it too, but
-      // only if the hex actually parses: color_hex is arbitrary JSON and may be junk.
-      if (ch && ch[0]) {
-        out.color = String("#") + ch;
-        if (pn5180ParseColorHex(out.color, out.colorRgb[0])) out.colorCount = 1;
-      }
+      pn5180ReadOpenSpoolColors(doc, out);
       float w = doc["weight"] | -1.0f; if (w > 0) out.totalWeight = w;
       float dia = doc["diameter"] | -1.0f; if (dia > 0) out.diameter = dia;
       int mn = doc["min_temp"] | -1; if (mn >= 0) out.temperatureMin = mn;

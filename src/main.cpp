@@ -532,8 +532,8 @@ static void nfcClassifyTag(PN5180TagType type, uint16_t atqa, uint8_t sak,
       // already asks at the one moment it works, so take its answer instead of asking
       // again at the wrong one; numPagesPresent=false means it genuinely couldn't tell.
       capacityBytesOut = ntagPagesPresent
-                       ? (ntagPages - 4) * 4 - 22   // drop pages 0-3, minus NDEF/record overhead
-                       : ntagUserBytes(NTAG_213) - 22;  // conservative fallback, same as the write path's
+                       ? pn5180OpenSpoolBudget((ntagPages - 4) * 4)   // drop pages 0-3, minus NDEF framing
+                       : pn5180OpenSpoolBudget(ntagUserBytes(NTAG_213));  // conservative fallback, same as the write path's
     }
   } else {
     writeFormatOut = "spoolIdNtag"; formatLabelOut = "unknown"; capacityBytesOut = 0;
@@ -697,14 +697,15 @@ static String nfcWriteUnsupportedFields(const SpoolTagData &d, const String &for
   // tigerTag stores dryingTemperature/dryingTime (bytes 28/29) but not td -- see
   // pn5180WriteNtagTigerTag. The Extended layouts do carry td.
   if (format != "nfcvOpenPrintTag" && !extHasDrying && d.td >= 0) add("td");
-  // OpenSpool carries a fixed 12-key JSON schema; everything below has no key there.
+  // OpenSpool carries a fixed 13-key JSON schema (see pn5180BuildOpenSpoolJson); everything
+  // below has no key there. Colours 2-3 do: they go into additional_color_hexes.
   // (OpenPrintTag's own gaps are not enumerated here -- it takes the widest field set
   // of all our formats, and its misses are the spec's, not a layout limitation.)
   // Only octoscaleExtended and ntagExtended carry a time of day -- their layouts had
   // reserved bytes to put it in. nfcvExtended is NOT in this list: it stores no date
   // fields at all (no firstUse/lastUse/purchasedOn on the wire), so a time of day there
   // would have nothing to qualify. OpenPrintTag's spec has no field for it either, and
-  // OpenSpool's 12-key schema is fixed.
+  // OpenSpool's 13-key schema is fixed.
   if (format != "octoscaleExtended" && format != "ntagExtended") {
     if (d.firstUseMinuteOfDay >= 0) add("firstUseMinuteOfDay");
     if (d.lastUseMinuteOfDay >= 0) add("lastUseMinuteOfDay");
