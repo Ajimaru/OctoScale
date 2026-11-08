@@ -733,7 +733,10 @@ static String nfcWriteUnsupportedFields(const SpoolTagData &d, const String &for
   // temperature/drying bytes have a home there -- everything else this codebase
   // otherwise carries has nowhere to go on this format.
   if (format == "tigerTag") {
-    if (d.vendor.length()) add("vendor");
+    // Vendor and finish have no text field here, but they reach the tag as the brand and
+    // aspect ids SpoolManagerExtended resolved them to -- lost only when that failed. The
+    // brand id is required for the write (pn5180WriteNtagTigerTag), the aspect id is not.
+    if (d.vendor.length() && d.tigerTagBrandId < 0) add("vendor");
     if (d.colorName.length()) add("colorName");
     if (d.density >= 0) add("density");
     if (d.diameterTolerance >= 0) add("diameterTolerance");
@@ -750,7 +753,7 @@ static String nfcWriteUnsupportedFields(const SpoolTagData &d, const String &for
     if (d.code.length()) add("code");
     if (d.batchNumber.length()) add("batchNumber");
     if (d.purchasedFrom.length()) add("purchasedFrom");
-    if (d.finish.length()) add("finish");
+    if (d.finish.length() && d.tigerTagAspectId < 0) add("finish");
     if (d.displayName.length()) add("displayName");
     if (d.firstUse >= 0) add("firstUse");
     if (d.lastUse >= 0) add("lastUse");
@@ -4098,6 +4101,22 @@ void pn5180Task(void *param) {
       g_nfcWriteErr = err;
       g_nfcWriteOk = ok;
       g_nfcWriteUid = g_pn5180Uid;  // UID of the tag on the reader during this write
+      // A write changed what this tag says. A flow still asking about its previous content
+      // (started when the tag was placed) kept offering that old spool: the post-write
+      // retry below carries the same UID, and flowOnTagPresent drops a same-UID trigger
+      // while a flow is running -- so "Weigh" booked the weight to the old spool. Reset it
+      // so the retry evaluates the new content; bumping g_flowGen also drops a DB check
+      // still running for the old one. LOADING/WEIGHING stay untouched (blocking calls
+      // that set g_flowState when they return); the weigh mirror's own write ends in DONE.
+      if (ok && g_flowUid.length() && g_flowUid == g_nfcWriteUid &&
+          (g_flowState == FLOW_DB_CHECK || g_flowState == FLOW_ASK_ACTION ||
+           g_flowState == FLOW_ASK_PRINTER || g_flowState == FLOW_ASK_TOOL ||
+           g_flowState == FLOW_WEIGH_CONFIRM)) {
+        dbgLogf("Flow: tag %s rewritten in state %s -> reset", g_flowUid.c_str(),
+                flowStateName(g_flowState));
+        flowReset(false);
+        g_flowGen++;
+      }
       if (ok) buzzerSuccess(); else buzzerError();  // write OK/error
       g_lastUid = "";            // force a re-read on the next poll
       // Debug mode's poll (1b above) has its OWN "did the tag change" cache
