@@ -940,7 +940,10 @@ static const char INDEX_HTML[] PROGMEM =
     "document.getElementById('nedbid').textContent=ext.databaseId>=0?ext.databaseId:'not set';"
     "document.getElementById('nemat').textContent=ext.material||'--';"
     "document.getElementById('nevnd').textContent=ext.vendor||'--';"
-    "document.getElementById('necol').textContent=ext.color||'--';"
+    // colorFull carries every colour plus transparent/rainbow; color is only the primary.
+    // "!= null", not a falsy test: an empty colorFull means "no colour" and must not
+    // fall back to color (see the colour-field contract in the Development Guide).
+    "document.getElementById('necol').textContent=(ext.colorFull!=null?ext.colorFull:ext.color)||'--';"
     "document.getElementById('necoln').textContent=ext.colorName||'--';"
     "document.getElementById('nedia').textContent=nn(ext.diameter,' mm');"
     "document.getElementById('neden').textContent=nn(ext.density,' g/cm3');"
