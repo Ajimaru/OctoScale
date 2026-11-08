@@ -4587,7 +4587,7 @@ void pn5180Task(void *param) {
                   ? "OpenPrintTag"
                   : "Extended";
                 // nfcvOpenSpool's real budget differs from nfcClassifyTag()'s
-                // nfcvExtended-sized default -- show the tag's actual NDEF capacity.
+                // nfcvExtended-sized default -- show the JSON budget this tag offers.
                 if (nfcvFormatFound == "nfcvOpenSpool" && nfcvCapacityFound >= 0)
                   g_nfcExtCacheCapacityBytes = nfcvCapacityFound;
               } else if (dummyHasExt && pr.type == PN5180_TAG_NFCA &&
@@ -4760,7 +4760,7 @@ void pn5180Task(void *param) {
                   ? "OpenPrintTag"
                   : "Extended";
                 // nfcvOpenSpool's real budget differs from nfcClassifyTag()'s
-                // nfcvExtended-sized default -- show the tag's actual NDEF capacity.
+                // nfcvExtended-sized default -- show the JSON budget this tag offers.
                 if (nfcvFormatFound == "nfcvOpenSpool" && nfcvCapacityFound >= 0)
                   g_nfcExtCacheCapacityBytes = nfcvCapacityFound;
               } else if (dummyHasExt && type == PN5180_TAG_NFCA &&

@@ -796,6 +796,7 @@ inline bool pn5180ReadNfcvExtended(const uint8_t uid[8], SpoolTagData &out);
 inline bool pn5180ReadNfcvOpenSpool(const uint8_t uid[8], SpoolTagData &out);
 // Needed by pn5180ReadSpoolEx's optional capacity output (nfcvOpenSpool only).
 inline int pn5180NfcvUserBytes(const uint8_t uid[8], uint8_t *bsOut = nullptr, uint8_t *nbOut = nullptr);
+inline int pn5180OpenSpoolBudget(int userBytes);
 // Needed by pn5180Probe's optional CC read (debug view only, see readCc param below).
 inline bool pn5180NtagReadPages(uint8_t startPage, int count, uint8_t *out);
 inline bool pn5180NtagCcIsVirgin(const uint8_t cc[4], bool &alreadyNdefOut);
@@ -1107,9 +1108,10 @@ inline bool pn5180ReadSpool(PN5180TagType &typeOut, long &idOut,
 // hasExtended -- only meaningful for NFC-V, where either nfcvExtended or nfcvOpenSpool
 // could be present (Mifare/NTAG have exactly one Extended format each, so the caller
 // can infer it from typeOut/SAK without this). Left untouched when hasExtended is false.
-// capacityBytesOut (optional): for an nfcvOpenSpool tag, the tag's real capacity (see
-// pn5180NfcvUserBytes) -- lets the UI show the actual NDEF budget instead of
-// nfcClassifyTag()'s nfcvExtended-sized default. Left untouched otherwise.
+// capacityBytesOut (optional): for an nfcvOpenSpool tag, the JSON budget the writer would
+// use on it (pn5180OpenSpoolBudget over the NDEF area after the CC block) -- the same unit
+// nfcClassifyTag() reports for NTAG, instead of its nfcvExtended-sized default. Left
+// untouched otherwise.
 inline bool pn5180ReadSpoolEx(PN5180TagType &typeOut, long &idOut, String &uidHexOut,
                               String &textOut, SpoolTagData &data, bool &hasExtended,
                               String *formatOut = nullptr, int *capacityBytesOut = nullptr) {
@@ -1162,7 +1164,8 @@ inline bool pn5180ReadSpoolEx(PN5180TagType &typeOut, long &idOut, String &uidHe
       } else if (pn5180ReadNfcvOpenSpool(rawUid, data)) {
         hasExtended = true; idOut = data.databaseId;
         if (formatOut) *formatOut = "nfcvOpenSpool";
-        if (capacityBytesOut) *capacityBytesOut = pn5180NfcvUserBytes(rawUid);
+        if (capacityBytesOut)
+          *capacityBytesOut = pn5180OpenSpoolBudget(pn5180NfcvUserBytes(rawUid) - 4 /* CC block */);
       }
       g_pn5180->reset(); g_pn5180->setupRF();
     }
@@ -2439,6 +2442,29 @@ static const int OPENSPOOL_LONG_OVERHEAD = 27;
 // Readers' upper bound for a JSON in the long form; NTAG216's whole user area is 888 B.
 static const int OPENSPOOL_MAX_READ_PAYLOAD = 1024;
 
+// A JSON string literal for an arbitrary value: quotes, backslashes and control characters
+// are escaped, bytes from 0x80 up pass through (JSON allows raw UTF-8). Material and vendor
+// are free text from SpoolManagerExtended; pasted in raw, a quote in either wrote invalid
+// JSON that every OpenSpool reader then rejected.
+inline String pn5180JsonString(const String &value) {
+  String out = "\"";
+  for (unsigned int i = 0; i < value.length(); i++) {
+    const char c = value[i];
+    if (c == '"' || c == '\\') {
+      out += '\\';
+      out += c;
+    } else if ((uint8_t)c < 0x20) {
+      char esc[8];
+      snprintf(esc, sizeof(esc), "\\u%04X", (unsigned)(uint8_t)c);
+      out += esc;
+    } else {
+      out += c;
+    }
+  }
+  out += "\"";
+  return out;
+}
+
 // Builds the OpenSpool JSON payload (spec fields + the os_db_id extension), applying
 // progressive field-dropping from the back of the priority list if the full JSON
 // doesn't fit budgetBytes. Returns the JSON string (possibly with fields dropped) and
@@ -2500,9 +2526,9 @@ inline String pn5180BuildOpenSpoolJson(const SpoolTagData &d, int budgetBytes, S
     { "\"protocol\"",     "\"openspool\"", false, true },
     { "\"version\"",      "\"1.0\"",       false, true },
     { "\"os_db_id\"",     String(osDbId),  false, d.databaseId >= 0 },
-    { "\"type\"",         "\"" + d.material + "\"", true, d.material.length() > 0 },
+    { "\"type\"",         pn5180JsonString(d.material), true, d.material.length() > 0 },
     { "\"color_hex\"",    "\"" + colorHex + "\"",   true, colorHex.length() > 0 },
-    { "\"brand\"",        "\"" + d.vendor + "\"",   true, d.vendor.length() > 0 },
+    { "\"brand\"",        pn5180JsonString(d.vendor),   true, d.vendor.length() > 0 },
     { "\"weight\"",       String(weightBuf), false, d.totalWeight >= 0 },
     { "\"diameter\"",     String(diaBuf),    false, d.diameter >= 0 },
     { "\"min_temp\"",     String(hotMin),    false, d.temperatureMin >= 0 },
@@ -2555,14 +2581,16 @@ inline bool pn5180NtagCcIsVirgin(const uint8_t cc[4], bool &alreadyNdefOut) {
   return cc[0] == 0 && cc[1] == 0 && cc[2] == 0 && cc[3] == 0;
 }
 
-// JSON budget for userBytes of NDEF space (CC excluded). Uses the long form's overhead
-// only where the short form's budget would exceed OPENSPOOL_MAX_PAYLOAD.
-// pn5180BuildOpenSpoolFrame then picks the form by the JSON's actual length, so a JSON
-// that fits the short form is still written in it.
+// JSON budget for userBytes of NDEF space (CC excluded). The long form's budget only where
+// it holds more than the short form's maximum -- at the transition (258-261 B of NDEF
+// space) its 5 extra framing bytes would otherwise cut the budget below the 235 B the
+// short form still carries. pn5180BuildOpenSpoolFrame then picks the form by the JSON's
+// actual length, so a JSON that fits the short form is still written in it.
 inline int pn5180OpenSpoolBudget(int userBytes) {
-  int budget = userBytes - OPENSPOOL_SHORT_OVERHEAD;
-  if (budget > OPENSPOOL_MAX_PAYLOAD) budget = userBytes - OPENSPOOL_LONG_OVERHEAD;
-  return budget;
+  const int longBudget = userBytes - OPENSPOOL_LONG_OVERHEAD;
+  if (longBudget > OPENSPOOL_MAX_PAYLOAD) return longBudget;
+  const int shortBudget = userBytes - OPENSPOOL_SHORT_OVERHEAD;
+  return shortBudget < OPENSPOOL_MAX_PAYLOAD ? shortBudget : OPENSPOOL_MAX_PAYLOAD;
 }
 
 // Frame for the OpenSpool JSON, laid out from the first NDEF page/block on: TLV header,
@@ -2607,13 +2635,16 @@ inline void pn5180PatchOpenSpoolLength(uint8_t first[4], int msgLen, bool longFo
 
 // Finds the JSON in an OpenSpool frame from its first 12 bytes (enough for the long TLV
 // plus the long record header). Accepts both forms pn5180BuildOpenSpoolFrame writes and
-// nothing else: TLV 0x03, then one MIME record without ID field, type length 16.
+// nothing else: TLV 0x03, then one MIME record without ID field, type length 16, and the
+// whole record inside the TLV's message length. The type bytes themselves lie past these
+// 12 bytes; the readers check them with pn5180IsOpenSpoolJsonType once the frame is in.
 inline bool pn5180LocateOpenSpoolJson(const uint8_t hdr[12], int &jsonOffOut, int &jsonLenOut) {
   if (hdr[0] != 0x03) return false;  // no NDEF TLV -> not an OpenSpool tag
   const bool longTlv = (hdr[1] == 0xFF);
   const int msgLen = longTlv ? ((hdr[2] << 8) | hdr[3]) : hdr[1];
   if (msgLen == 0) return false;  // empty/aborted-write placeholder, not a real record
-  int p = longTlv ? 4 : 2;
+  const int tlvHeaderLen = longTlv ? 4 : 2;
+  int p = tlvHeaderLen;
   const uint8_t recHdr = hdr[p];
   if (recHdr != 0xD2 && recHdr != 0xC2) return false;  // not our MIME record shape
   const uint8_t typeLen = hdr[p + 1];
@@ -2627,9 +2658,28 @@ inline bool pn5180LocateOpenSpoolJson(const uint8_t hdr[12], int &jsonOffOut, in
     p += 6;
   }
   if (typeLen != 16 || payloadLen == 0 || payloadLen > (uint32_t)OPENSPOOL_MAX_READ_PAYLOAD) return false;
+  // A record that runs past the message it belongs to is malformed; its payload must not
+  // be trusted (os_db_id in it would pick the spool).
+  if ((uint32_t)(p - tlvHeaderLen) + typeLen + payloadLen > (uint32_t)msgLen) return false;
   jsonOffOut = p + typeLen;
   jsonLenOut = (int)payloadLen;
   return true;
+}
+
+// True when the record type right before the JSON is exactly "application/json".
+// pn5180LocateOpenSpoolJson only checked its length; another 16-character type with a
+// JSON-looking payload would otherwise count as an OpenSpool tag, and an os_db_id in it
+// would pick a spool.
+inline bool pn5180IsOpenSpoolJsonType(const uint8_t *frame, int jsonOff) {
+  const int typeLen = (int)strlen(NDEF_MIME_TYPE);
+  return jsonOff >= typeLen && memcmp(frame + jsonOff - typeLen, NDEF_MIME_TYPE, typeLen) == 0;
+}
+
+// Pages (NTAG) or blocks (NFC-V) of 4 bytes to read from the first NDEF unit to the end of
+// the JSON. Rounded up, no extra margin: on a tag the JSON fills, one more unit lies past
+// its end, and that read failing failed the whole read-back.
+inline int pn5180OpenSpoolUnitsToRead(int jsonOff, int jsonLen) {
+  return (jsonOff + jsonLen + 3) / 4;
 }
 
 // Writes the OpenSpool NDEF message. Length-then-message ordering: the TLV length is
@@ -2761,11 +2811,10 @@ inline bool pn5180ReadNtagOpenSpool(SpoolTagData &out) {
   int jsonOff = 0, jsonLen = 0;
   if (!pn5180LocateOpenSpoolJson(hdr, jsonOff, jsonLen)) return false;
 
-  int totalNeeded = jsonOff + jsonLen;          // from the TLV tag to the end of the JSON
-  int pagesNeeded = (totalNeeded + 3) / 4 + 1;  // +1 rounding margin
+  int pagesNeeded = pn5180OpenSpoolUnitsToRead(jsonOff, jsonLen);
   uint8_t *buf = (uint8_t *)malloc(pagesNeeded * 4);
   if (!buf) return false;
-  bool ok = pn5180NtagReadPages(4, pagesNeeded, buf);
+  bool ok = pn5180NtagReadPages(4, pagesNeeded, buf) && pn5180IsOpenSpoolJsonType(buf, jsonOff);
   if (ok) {
     const char *jsonStart = (const char *)(buf + jsonOff);
     JsonDocument doc;
@@ -3796,13 +3845,13 @@ inline bool pn5180ReadNfcvOpenSpool(const uint8_t uid[8], SpoolTagData &out) {
   int jsonOff = 0, jsonLen = 0;
   if (!pn5180LocateOpenSpoolJson(hdr, jsonOff, jsonLen)) return false;
 
-  int totalNeeded = jsonOff + jsonLen;           // from the TLV tag to the end of the JSON
-  int blocksNeeded = (totalNeeded + 3) / 4 + 1;  // +1 rounding margin
+  int blocksNeeded = pn5180OpenSpoolUnitsToRead(jsonOff, jsonLen);
   uint8_t *buf = (uint8_t *)malloc(blocksNeeded * 4);
   if (!buf) return false;
   bool ok = true;
   for (int i = 0; i < blocksNeeded && ok; i++)
     ok = pn5180NfcvReadBlock(uid, NFCV_OS_NDEF_BLOCK + i, buf + i * 4);
+  if (ok) ok = pn5180IsOpenSpoolJsonType(buf, jsonOff);
   if (ok) {
     const char *jsonStart = (const char *)(buf + jsonOff);
     JsonDocument doc;
