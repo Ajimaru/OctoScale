@@ -1843,7 +1843,8 @@ static void menuRenderNfcWrite() {
     g_tft.drawString("Do not remove tag", cx, h / 2 + 58, 4);
     g_tft.setTextDatum(TL_DATUM);
   } else {
-    String fmt = (g_nfcWriteKind == NFCWRITE_SPOOL) ? g_nfcWriteFormat : String("legacy ID");
+    bool spoolKind = nfcWriteIsSpoolKind(g_nfcWriteKind);
+    String fmt = spoolKind ? g_nfcWriteFormat : String("legacy ID");
     if (erasing) {
       if (g_nfcWriteOk) menuMessage("Tag erased", MENU_OK);
       else              menuMessage("Erase failed", MENU_ERR, g_nfcWriteErr.c_str());
@@ -1851,10 +1852,15 @@ static void menuRenderNfcWrite() {
       // A write that succeeded but lost material/color (small tag + OpenSpool) gets the
       // warning colour and says so -- a plain green "Tag written" would hide that the
       // tag now holds little more than the spool ID. menuMessage word-wraps the sub line.
-      String warn = (g_nfcWriteKind == NFCWRITE_SPOOL)
+      // A shortened text field (Extended, TigerTag) gets the warning colour too, but not
+      // the "ID only" title: everything else did make it onto the tag.
+      String warn = spoolKind
                       ? nfcWriteDropWarning(g_nfcWriteDroppedFields, g_nfcWriteFormat) : String("");
-      if (warn.length()) menuMessage("ID only", MENU_WARN, warn.c_str());
-      else               menuMessage("Tag written", MENU_OK, fmt.c_str());
+      if (warn.length())
+        menuMessage(nfcFormatOnlyShortensText(g_nfcWriteFormat) ? "Tag written" : "ID only",
+                    MENU_WARN, warn.c_str());
+      else
+        menuMessage("Tag written", MENU_OK, fmt.c_str());
     }
     else                     menuMessage("Write failed", MENU_ERR, g_nfcWriteErr.c_str());
   }

@@ -231,12 +231,23 @@ static const int NTAG_EXT_CRC_LEN = (NTAG_EXT_PAGE_CRC - NTAG_EXT_PAGE_START) * 
 // byte order is wrong for this format.
 //
 // Payload is exactly 80 bytes (pages 4-23, NTAG213-sized, unsigned/"Standard"
-// variant) -- offsets below are relative to page 4 = byte 0. Bytes 32+ (Twin-Tag-ID,
-// Color 2/3, TD, custom message, measure-available) are NOT written: no verified
-// SDK source for their layout was available at implementation time (see the
-// TigerTag write-support conversation) -- leaving them zeroed is the deliberate
-// choice over guessing.
+// variant) -- offsets below are relative to page 4 = byte 0. Bytes 0-31 are the ids,
+// colour, measure and temperatures (see pn5180WriteNtagTigerTag). The rest, per
+// TigerTag-SDK-Python tigertag/tag.py (_parse/to_bytes, read 2026-11-08):
+//   32-35 timestamp (u32)        36-38 colour 2 RGB       39 tag_info (u8)
+//   40-42 colour 3 RGB           43 reserved              44-45 td x10 (u16)
+//   46-47 reserved               48-75 custom message (UTF-8, zero-padded)
+//   76-78 measure_available (u24) 79 reserved
+// The writer fills the custom message and measure_available. Everything else in
+// 32-79 stays 0; tag_info 0 means "unknown tag index/count" in the SDK.
 static const uint8_t TIGERTAG_PAGE_START = 4;
+static const int TIGERTAG_OFF_MESSAGE = 48;
+static const int TIGERTAG_MESSAGE_LEN = 28;
+static const int TIGERTAG_OFF_AVAILABLE = 76;  // page 4 + 76/4 = page 23, bytes 0-2
+// id_measure_unit "g" in the SDK's registry -- what SpoolManagerExtended sends. The weigh
+// flow only updates a tag in this unit: its reading is grams, and the same number on a
+// tag that counts in kg or in a length would be wrong in that unit.
+static const long TIGERTAG_UNIT_GRAMS = 21;
 static const uint32_t TIGERTAG_MAGIC_STANDARD = 0x5BF59264;  // unsigned, what we write
 // static const uint32_t TIGERTAG_MAGIC_PLUS = 0xBC0FCB97;  // signed variant -- never
 // written here, would need a private key we don't have.
@@ -290,9 +301,9 @@ struct SpoolTagData {
   int firstUseMinuteOfDay = -1, lastUseMinuteOfDay = -1, purchasedOnMinuteOfDay = -1;
   float cost = -1;                          // 2 decimal places
 
-  // Drying fields (OpenPrintTag spec keys 57/58) plus td (key 27). No octoscaleExtended
-  // layout carries any of them. OPT carries all three; TigerTag carries the two drying
-  // fields (bytes 28/29) but not td.
+  // Drying fields (OpenPrintTag spec keys 57/58) plus td (key 27). OPT and the three
+  // Extended layouts carry all three. The TigerTag writer fills the two drying fields
+  // (bytes 28/29) but not td, although the layout has a td byte pair at 44-45.
   //
   // dryingTime is in MINUTES everywhere on THIS side of the boundary -- the OPT spec
   // unit, and what /nfcprobe reports and /nfcwritespool accepts. Per-layout conversion
@@ -3386,6 +3397,19 @@ inline bool pn5180WriteNtagExtended(const SpoolTagData &d, int &bytesWrittenOut,
   return ok;
 }
 
+// measure_available (+76) for a remaining quantity: whole units of measure (the writer
+// packs totalWeight there verbatim, so grams). The SDK refuses a value above measure
+// whenever measure is set (_check_available), hence the clamp; with measure 0 ("not
+// set" to the SDK) only the u24 range limits it, same cap as measure itself. An unknown
+// remaining quantity is written as 0 -- see pn5180ReadNtagTigerTag for how 0 reads back.
+inline uint32_t pn5180TigerTagAvailable(float remaining, uint32_t measure) {
+  if (remaining < 0) return 0;
+  long v = lroundf(remaining);
+  if (v < 0) return 0;
+  uint32_t cap = (measure > 0) ? measure : 0xFFFFFE;
+  return ((uint32_t)v > cap) ? cap : (uint32_t)v;
+}
+
 // Writes the TigerTag Standard (unsigned) layout -- see the constants block above for
 // the byte-offset table and its provenance. Unlike every OctoScale-native format,
 // this one has NO commit-marker discipline of its own (the SDK's discriminator is the
@@ -3399,9 +3423,11 @@ inline bool pn5180WriteNtagExtended(const SpoolTagData &d, int &bytesWrittenOut,
 // fields this function requires -- everything else (color/measure/temps) is optional,
 // same -1/"" = not-set convention as every other SpoolTagData field, written as 0 if
 // unset (TigerTag has no dedicated NOT_SET sentinel documented for these bytes).
+// droppedFieldsOut lists "displayName" when the name had to be shortened to fit the
+// 28-byte custom message.
 inline bool pn5180WriteNtagTigerTag(const SpoolTagData &d, int &bytesWrittenOut,
-                                    String &errOut) {
-  errOut = ""; bytesWrittenOut = 0;
+                                    String &droppedFieldsOut, String &errOut) {
+  errOut = ""; bytesWrittenOut = 0; droppedFieldsOut = "";
   // tigerTagAspectId is the one optional ID of the six: SpoolManagerExtended's own payload
   // builder deliberately leaves it null/unresolved for any spool with no Finish set,
   // which field testing confirmed is the common case, not an edge case (see the
@@ -3484,6 +3510,19 @@ inline bool pn5180WriteNtagTigerTag(const SpoolTagData &d, int &bytesWrittenOut,
           : (d.bedTemperature >= 0)    ? (uint8_t)constrain(d.bedTemperature, 0, 0xFF) : 0;
   buf[31] = (d.bedTemperatureMax >= 0) ? (uint8_t)constrain(d.bedTemperatureMax, 0, 0xFF) : 0;
 
+  // Custom message (48-75): the spool's display name, the only free-text field in this
+  // layout. Cut at a character boundary rather than at byte 28 -- the SDK's to_bytes()
+  // cuts the encoded bytes blindly, which can leave half a character on the tag.
+  if (d.displayName.length()) {
+    String msg = pn5180Utf8SafeTruncate(d.displayName, TIGERTAG_MESSAGE_LEN);
+    memcpy(buf + TIGERTAG_OFF_MESSAGE, msg.c_str(), msg.length());
+    if (msg.length() < d.displayName.length()) droppedFieldsOut = "displayName";
+  }
+  uint32_t avail = pn5180TigerTagAvailable(d.remainingWeight, measure);
+  buf[TIGERTAG_OFF_AVAILABLE]     = (uint8_t)(avail >> 16);
+  buf[TIGERTAG_OFF_AVAILABLE + 1] = (uint8_t)(avail >> 8);
+  buf[TIGERTAG_OFF_AVAILABLE + 2] = (uint8_t)avail;
+
   // Magic (offset 0-3) LAST -- see function comment.
   buf[0] = (uint8_t)(TIGERTAG_MAGIC_STANDARD >> 24);
   buf[1] = (uint8_t)(TIGERTAG_MAGIC_STANDARD >> 16);
@@ -3558,6 +3597,76 @@ inline bool pn5180ReadNtagTigerTag(SpoolTagData &out) {
   out.bedTemperatureMin = (buf[30] > 0) ? (int)buf[30] : -1;
   out.bedTemperatureMax = (buf[31] > 0) ? (int)buf[31] : -1;
 
+  // measure_available: 0 reads as "not known", not as an empty spool. The SDK's create()
+  // starts it at measure and its blank template at 0, and OpenRFID PR #35 (not checked
+  // here) reports factory tags carrying 0 -- this layout cannot tell those apart.
+  uint32_t avail = ((uint32_t)buf[TIGERTAG_OFF_AVAILABLE] << 16) |
+                   ((uint32_t)buf[TIGERTAG_OFF_AVAILABLE + 1] << 8) |
+                   buf[TIGERTAG_OFF_AVAILABLE + 2];
+  out.remainingWeight = (avail > 0) ? (float)avail : -1;
+
+  // Custom message -> displayName, up to the zero padding. Not validated as UTF-8: a tag
+  // from the SDK can end in half a character (see the writer), and that is passed on as
+  // read rather than guessed at.
+  char msg[TIGERTAG_MESSAGE_LEN + 1];
+  memcpy(msg, buf + TIGERTAG_OFF_MESSAGE, TIGERTAG_MESSAGE_LEN);
+  msg[TIGERTAG_MESSAGE_LEN] = 0;
+  out.displayName = String(msg);
+
+  return true;
+}
+
+// Updates ONLY measure_available (+76, page 23) of the TigerTag Standard tag on the
+// reader -- what the weigh flow does with a new reading. The SDK calls the field
+// "remaining (updated by Tiger Scale)". Everything else is left alone on purpose: a full
+// rewrite from the decoded fields would zero what this firmware does not decode
+// (timestamp, colours 2/3, td, a message written by another app) and reset the product
+// id to generic. Refused when the tag on the reader is not expectUid or no longer
+// carries the Standard magic, so a tag swapped or rewritten since the update was queued
+// is never patched, and when the tag counts in another unit than grams (see
+// TIGERTAG_UNIT_GRAMS). The clamp uses the measure the tag itself carries; byte 79
+// (reserved) is written back as read. The page is read back afterwards, because
+// pn5180NtagWritePage does not check the tag's ACK.
+inline bool pn5180PatchNtagTigerTagAvailable(const String &expectUid, float remaining,
+                                             int &bytesWrittenOut, String &errOut) {
+  errOut = ""; bytesWrittenOut = 0;
+  if (!g_pn5180Ready || !g_pn5180) { errOut = "reader not ready"; return false; }
+  auto fail = [&](const char *why) {
+    errOut = why;
+    g_pn5180->reset(); g_pn5180->setupRF();
+    return false;
+  };
+  PN5180ProbeResult pr;
+  if (!pn5180ProbeNfcA(pr)) return fail("no NFC-A tag");
+  if (pr.uid != expectUid) return fail("a different tag is on the reader");
+  uint8_t buf[TIGERTAG_PAYLOAD_LEN];
+  if (!pn5180NtagReadPages(TIGERTAG_PAGE_START, TIGERTAG_PAYLOAD_LEN / 4, buf))
+    return fail("tag read failed");
+  uint32_t magic = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) | ((uint32_t)buf[2] << 8) | buf[3];
+  if (magic != TIGERTAG_MAGIC_STANDARD) return fail("tag no longer holds a TigerTag");
+  if (buf[23] != TIGERTAG_UNIT_GRAMS) return fail("tag quantity is not in grams");
+
+  uint32_t measure = ((uint32_t)buf[20] << 16) | ((uint32_t)buf[21] << 8) | buf[22];
+  uint32_t avail = pn5180TigerTagAvailable(remaining, measure);
+  const uint8_t pageNo = TIGERTAG_PAGE_START + TIGERTAG_OFF_AVAILABLE / 4;
+  uint8_t page[4] = { (uint8_t)(avail >> 16), (uint8_t)(avail >> 8), (uint8_t)avail,
+                      buf[TIGERTAG_OFF_AVAILABLE + 3] };
+  // reselect: the READ above leaves the transceiver in the state pn5180NtagWritePage's
+  // comment warns about; it also re-checks the UID.
+  if (!pn5180NtagWritePage(pr.uid, pageNo, page, /*reselect=*/true, errOut)) {
+    g_pn5180->reset(); g_pn5180->setupRF();
+    return false;
+  }
+  g_pn5180->reset(); g_pn5180->setupRF();
+  PN5180ProbeResult pr2;
+  uint8_t back[4];
+  if (!pn5180ProbeNfcA(pr2) || pr2.uid != pr.uid || !pn5180NtagReadPages(pageNo, 1, back) ||
+      memcmp(back, page, 4) != 0)
+    return fail("verify failed");
+  bytesWrittenOut = 4;
+  dbgLogf("NTAG TigerTag remaining update: %lu (measure %lu) ok",
+          (unsigned long)avail, (unsigned long)measure);
+  g_pn5180->reset(); g_pn5180->setupRF();
   return true;
 }
 
@@ -3968,8 +4077,8 @@ inline bool pn5180WriteSpoolTag(const SpoolTagData &d, String &formatOut,
       }
       if (ntagFormat == "tigerTag") {
         formatOut = "tigerTag";
-        // Foreign format, no truncatable strings -- droppedFieldsOut stays empty.
-        return pn5180WriteNtagTigerTag(d, bytesWrittenOut, errOut);
+        // Foreign format; the display name is its one truncatable string.
+        return pn5180WriteNtagTigerTag(d, bytesWrittenOut, droppedFieldsOut, errOut);
       }
       formatOut = "openSpool";
       return pn5180WriteNtagOpenSpool(d, droppedFieldsOut, bytesWrittenOut, errOut);
