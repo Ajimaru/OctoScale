@@ -106,6 +106,8 @@ Placing a tagged spool on the platform starts the flow automatically.
 
 The **Save weight** path is also the unload path. It shows `Put on scale` with a live reading and the expected remaining weight, so you can confirm the spool is seated before PUSH commits the value.
 
+If the spool's own tag is still on the reader, **Save weight** also puts the new remaining weight on the tag. Extended tags are rewritten; a TigerTag gets only its remaining-quantity field updated, the rest of the tag stays as it was. OpenSpool and OpenPrintTag have no field for it, so those tags are left alone and the **Saved** screen says so.
+
 <img src="https://raw.githubusercontent.com/Ajimaru/OctoScale/main/assets/screens/weigh-confirm.svg" width="240" alt="">
 
 ### Device menu

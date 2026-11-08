@@ -621,9 +621,18 @@ String g_nfcWriteErr = "";              // error text (task writes, handler read
 // POST /nfcwritespool and POST /nfcerase: two more write modes that share
 // g_nfcWriteReq/Pending/Done/Ok/DoneAt/SuppressUntil above (only one write in flight
 // at a time, any kind) but differ in what pn5180Task runs and what it reports back.
-// g_nfcWriteKind distinguishes which of the three write functions pn5180Task should run.
-enum NfcWriteKind { NFCWRITE_ID, NFCWRITE_SPOOL, NFCWRITE_ERASE };
+// g_nfcWriteKind distinguishes which of the write functions pn5180Task should run.
+// NFCWRITE_REMAINING has no endpoint: only the weigh flow queues it, to update the
+// remaining weight of a TigerTag in place (see flowDoWeighSave). It reports like a spool
+// write, with format "tigerTag".
+enum NfcWriteKind { NFCWRITE_ID, NFCWRITE_SPOOL, NFCWRITE_ERASE, NFCWRITE_REMAINING };
 volatile NfcWriteKind g_nfcWriteKind = NFCWRITE_ID;
+// NFCWRITE_REMAINING only: the UID of the tag the update was queued for. Set together
+// with the kind, so it never outlives the request it belongs to.
+String g_nfcWritePatchUid = "";
+static bool nfcWriteIsSpoolKind(NfcWriteKind k) {
+  return k == NFCWRITE_SPOOL || k == NFCWRITE_REMAINING;
+}
 // Set when a write is refused because the chosen format's payload does not fit the tag.
 // Reported as structured fields on /nfcwritestatus so a caller can react ("pick a bigger
 // tag" / "switch format") without having to parse the error string.
@@ -694,8 +703,8 @@ static String nfcWriteUnsupportedFields(const SpoolTagData &d, const String &for
     if (d.dryingTemperature >= 0) add("dryingTemperature");
     if (d.dryingTime >= 0) add("dryingTime");
   }
-  // tigerTag stores dryingTemperature/dryingTime (bytes 28/29) but not td -- see
-  // pn5180WriteNtagTigerTag. The Extended layouts do carry td.
+  // The tigerTag writer fills dryingTemperature/dryingTime (bytes 28/29) but not td --
+  // see pn5180WriteNtagTigerTag. The Extended layouts do carry td.
   if (format != "nfcvOpenPrintTag" && !extHasDrying && d.td >= 0) add("td");
   // OpenSpool carries a fixed 13-key JSON schema (see pn5180BuildOpenSpoolJson); everything
   // below has no key there. Colours 2-3 do: they go into additional_color_hexes.
@@ -729,9 +738,10 @@ static String nfcWriteUnsupportedFields(const SpoolTagData &d, const String &for
     if (d.displayName.length()) add("displayName");
   }
   // TigerTag Standard: fixed 80-byte foreign layout (see pn5180WriteNtagTigerTag).
-  // Only the 6 registry IDs, color, one weight-or-length "measure" value, and 6
-  // temperature/drying bytes have a home there -- everything else this codebase
-  // otherwise carries has nowhere to go on this format.
+  // The writer fills the 6 registry IDs, color, one weight-or-length "measure" value,
+  // 6 temperature/drying bytes, the remaining quantity (measure_available) and the
+  // display name (custom message) -- everything else this codebase otherwise carries
+  // has nowhere to go on this format.
   if (format == "tigerTag") {
     // Vendor and finish have no text field here, but they reach the tag as the brand and
     // aspect ids SpoolManagerExtended resolved them to -- lost only when that failed. The
@@ -742,7 +752,6 @@ static String nfcWriteUnsupportedFields(const SpoolTagData &d, const String &for
     if (d.diameterTolerance >= 0) add("diameterTolerance");
     if (d.spoolWeight >= 0) add("spoolWeight");
     if (d.usedWeight >= 0) add("usedWeight");
-    if (d.remainingWeight >= 0) add("remainingWeight");
     if (d.usedLength >= 0) add("usedLength");
     if (d.totalLength >= 0 && d.totalWeight >= 0) add("totalLength");  // measure slot already used by totalWeight
     if (d.enclosureTemperature >= 0) add("enclosureTemperature");
@@ -754,7 +763,6 @@ static String nfcWriteUnsupportedFields(const SpoolTagData &d, const String &for
     if (d.batchNumber.length()) add("batchNumber");
     if (d.purchasedFrom.length()) add("purchasedFrom");
     if (d.finish.length() && d.tigerTagAspectId < 0) add("finish");
-    if (d.displayName.length()) add("displayName");
     if (d.firstUse >= 0) add("firstUse");
     if (d.lastUse >= 0) add("lastUse");
     if (d.purchasedOn >= 0) add("purchasedOn");
@@ -762,17 +770,29 @@ static String nfcWriteUnsupportedFields(const SpoolTagData &d, const String &for
   return out;
 }
 
-// Every write format this firmware knows carries remainingWeight EXCEPT OpenPrintTag
-// (nfcvOpenPrintTag): its spec (openprinttag.h) has no matching field, so the value
-// would silently vanish on write rather than showing up as a dropped/unsupported field
-// like the others do above.
+// The formats whose layout has a field for the remaining weight: the three Extended
+// layouts and TigerTag (measure_available). Listed explicitly rather than "all but X":
+// this used to exclude only OpenPrintTag, so every weigh of an OctoScale-written
+// OpenSpool tag queued a full rewrite of it for a value its JSON has no key for (see the
+// openSpool entries in nfcWriteUnsupportedFields). Measured on an NTAG215: a 22 s write
+// (224 B) after the weigh, reported as "Written, but openSpool cannot store:
+// usedWeight,remainingWeight".
 static bool nfcFormatHasRemainingWeight(const String &format) {
-  return format.length() > 0 && format != "nfcvOpenPrintTag";
+  return format == "octoscaleExtended" || format == "ntagExtended" ||
+         format == "nfcvExtended" || format == "tigerTag";
+}
+
+// Formats whose only possible loss on a successful write is a shortened text field,
+// never a whole field (see nfcWriteDropWarning). The TFT result screen uses this to
+// tell that case apart from OpenSpool's "only the ID fit".
+static bool nfcFormatOnlyShortensText(const String &format) {
+  return format == "octoscaleExtended" || format == "nfcvExtended" ||
+         format == "ntagExtended" || format == "tigerTag";
 }
 
 static String nfcWriteDropWarning(const String &dropped, const String &format) {
   if (!dropped.length()) return "";
-  if (format == "octoscaleExtended" || format == "nfcvExtended" || format == "ntagExtended") {
+  if (nfcFormatOnlyShortensText(format)) {
     return "some text fields were shortened to fit the tag: " + dropped;
   }
   bool lostType  = dropped.indexOf("\"type\"") >= 0;
@@ -1429,9 +1449,17 @@ static void flowDoWeighSave() {
     // succeeded above; a tag-sync problem here is reported as a warning only (per
     // product decision), it never rolls the DB write back.
     String tagWarn;
+    // A tag that carries a spool id must carry this spool's id. A tag without one
+    // (TigerTag) is matched by its UID instead: the flow found this spool by looking up
+    // exactly this tag's UID (runDbCheck's byCode path), so the database itself ties the
+    // tag to the spool. Before this check, such a tag never matched, so a TigerTag was
+    // never updated after a weigh.
+    bool tagHasId = g_nfcExtCacheData.databaseId >= 0;
+    bool tagMatches = tagHasId ? (g_nfcExtCacheData.databaseId == g_flowSpoolId)
+                               : (g_flowLookupByCode && g_flowLookupUid == g_pn5180Uid);
     if (!(g_pn5180Present && g_nfcExtCacheUid == g_pn5180Uid)) {
       tagWarn = "tag not on reader, not updated";
-    } else if (!g_nfcExtCacheHasExtended || g_nfcExtCacheData.databaseId != g_flowSpoolId) {
+    } else if (!g_nfcExtCacheHasExtended || !tagMatches) {
       tagWarn = "tag doesn't match this spool, not updated";
     } else if (!nfcFormatHasRemainingWeight(g_nfcExtCacheWriteFormat)) {
       tagWarn = g_nfcExtCacheWriteFormat + " tag format has no remainingWeight field, not updated";
@@ -1441,6 +1469,18 @@ static void flowDoWeighSave() {
       float remaining = (g_flowSpoolWeight >= 0.0f) ? (g_flowGrossWeight - g_flowSpoolWeight) : -1.0f;
       if (remaining < 0.0f) {
         tagWarn = "no reference weight, tag not updated";
+      } else if (g_nfcExtCacheWriteFormat == "tigerTag") {
+        // Only measure_available is updated, in place -- the rest of a TigerTag is left
+        // as it is, see pn5180PatchNtagTigerTagAvailable. Checked here as well as there:
+        // here it is a note next to "Weight saved", there it would be a failed write.
+        if (g_nfcExtCacheData.tigerTagMeasureUnitId != TIGERTAG_UNIT_GRAMS) {
+          tagWarn = "TigerTag quantity not in grams, not updated";
+        } else {
+          g_nfcWriteSpoolData = SpoolTagData();
+          g_nfcWriteSpoolData.remainingWeight = remaining;
+          g_nfcWritePatchUid = g_pn5180Uid;
+          g_nfcWriteKind = NFCWRITE_REMAINING;
+        }
       } else {
         g_nfcWriteSpoolData = g_nfcExtCacheData;
         g_nfcWriteSpoolData.remainingWeight = remaining;
@@ -1454,9 +1494,10 @@ static void flowDoWeighSave() {
         // format" mode), so passing the wrong one here would silently reformat the tag
         // into a different layout instead of updating the one on it.
         g_nfcWriteNfcvFormat = (g_nfcExtCacheWriteFormat == "nfcvOpenSpool") ? "openSpool" : "extended";
-        g_nfcWriteNtagFormat = (g_nfcExtCacheWriteFormat == "tigerTag") ? "tigerTag"
-                              : (g_nfcExtCacheWriteFormat == "ntagExtended") ? "extended" : "openSpool";
+        g_nfcWriteNtagFormat = (g_nfcExtCacheWriteFormat == "ntagExtended") ? "extended" : "openSpool";
         g_nfcWriteKind = NFCWRITE_SPOOL;
+      }
+      if (!tagWarn.length()) {
         g_nfcWriteDone = false;
         g_nfcWriteDoneAt = millis();
         g_nfcWritePending = true;
@@ -2600,7 +2641,7 @@ void startWebServer() {
     if (g_nfcWriteDone) {
       doc["ok"] = g_nfcWriteOk;
       doc["uid"] = g_nfcWriteUid;
-      if (g_nfcWriteKind == NFCWRITE_SPOOL) {
+      if (nfcWriteIsSpoolKind(g_nfcWriteKind)) {
         doc["format"] = g_nfcWriteFormat;
         doc["bytesWritten"] = g_nfcWriteBytesWritten;
         // Capacity refusal (currently OpenPrintTag only): structured so a caller can
@@ -2657,10 +2698,11 @@ void startWebServer() {
           String note = g_nfcWriteFormat + " cannot store: " + g_nfcWriteUnsupportedFields;
           msgSuffix = msgSuffix.length() ? (msgSuffix + "; " + note) : note;
         }
+        String what = (g_nfcWriteKind == NFCWRITE_REMAINING) ? "Remaining weight written ("
+                                                              : "Spool data written (";
         doc["msg"] = !g_nfcWriteOk ? ("Write/verify failed: " + g_nfcWriteErr)
                    : msgSuffix.length() ? ("Written, but " + msgSuffix)
-                   : ("Spool data written (" + g_nfcWriteFormat + ", " +
-                      String(g_nfcWriteBytesWritten) + " B)");
+                   : (what + g_nfcWriteFormat + ", " + String(g_nfcWriteBytesWritten) + " B)");
       } else if (g_nfcWriteKind == NFCWRITE_ERASE) {
         doc["format"] = g_nfcWriteFormat;
         doc["error"] = g_nfcWriteOk ? "" : g_nfcWriteErr;
@@ -2673,7 +2715,7 @@ void startWebServer() {
       // red = failed. The amber case would otherwise look identical to a full success.
       if (!peek) {
         if (!g_nfcWriteOk) ledFlash(pixel.Color(LED_BRIGHT * 2, 0, 0), 1500);         // red
-        else if (g_nfcWriteKind == NFCWRITE_SPOOL &&
+        else if (nfcWriteIsSpoolKind(g_nfcWriteKind) &&
                  nfcWriteDropWarning(g_nfcWriteDroppedFields, g_nfcWriteFormat).length())
           ledFlash(pixel.Color(LED_BRIGHT * 3, LED_BRIGHT * 2, 0), 1500);             // amber
         else ledFlash(pixel.Color(0, LED_BRIGHT * 3, 0), 1500);                        // green
@@ -4087,6 +4129,19 @@ void pn5180Task(void *param) {
         dbgLogf("pn5180Task: spool write result ok=%d format=%s bytes=%d err=%s",
                 ok, format.c_str(), bytesWritten, err.c_str());
         if (dropped.length()) dbgLog("pn5180Task: dropped fields: " + dropped);
+      } else if (g_nfcWriteKind == NFCWRITE_REMAINING) {
+        dbgLogf("pn5180Task: remaining-weight update picked up, remaining=%.1f",
+                g_nfcWriteSpoolData.remainingWeight);
+        int bytesWritten = 0;
+        ok = pn5180PatchNtagTigerTagAvailable(g_nfcWritePatchUid,
+                                              g_nfcWriteSpoolData.remainingWeight,
+                                              bytesWritten, err);
+        g_nfcWriteFormat = "tigerTag";
+        g_nfcWriteBytesWritten = bytesWritten;
+        g_nfcWriteDroppedFields = "";
+        g_nfcWriteUnsupportedFields = "";  // only the one field was written, and it has a home
+        dbgLogf("pn5180Task: remaining-weight update result ok=%d bytes=%d err=%s",
+                ok, bytesWritten, err.c_str());
       } else if (g_nfcWriteKind == NFCWRITE_ERASE) {
         dbgLog("pn5180Task: erase request picked up");
         String format;

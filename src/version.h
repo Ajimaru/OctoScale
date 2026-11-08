@@ -3,7 +3,7 @@
 // Bump on release. Build timestamp is added automatically.
 #define FW_VERSION_RELEASE "0.0.6"
 
-// Dev builds get a running number appended ("0.0.3-dev7") so a device can say exactly
+// Dev builds get a running number appended ("x.x.x-devN") so a device can say exactly
 // which build is on it -- flashing the same release version twice is otherwise
 // indistinguishable on the TFT, in /nfcprobe's sibling endpoints and in the web UI.
 // tools/dev_build.py defines FW_DEV_BUILD on every local build and keeps the counter
