@@ -703,9 +703,9 @@ static String nfcWriteUnsupportedFields(const SpoolTagData &d, const String &for
     if (d.dryingTemperature >= 0) add("dryingTemperature");
     if (d.dryingTime >= 0) add("dryingTime");
   }
-  // The tigerTag writer fills dryingTemperature/dryingTime (bytes 28/29) but not td --
-  // see pn5180WriteNtagTigerTag. The Extended layouts do carry td.
-  if (format != "nfcvOpenPrintTag" && !extHasDrying && d.td >= 0) add("td");
+  // td: OpenPrintTag (key 27), the Extended layouts and TigerTag (bytes 44-45, see
+  // pn5180WriteNtagTigerTag) carry it.
+  if (format != "nfcvOpenPrintTag" && format != "tigerTag" && !extHasDrying && d.td >= 0) add("td");
   // OpenSpool carries a fixed 13-key JSON schema (see pn5180BuildOpenSpoolJson); everything
   // below has no key there. Colours 2-3 do: they go into additional_color_hexes.
   // (OpenPrintTag's own gaps are not enumerated here -- it takes the widest field set
@@ -738,10 +738,11 @@ static String nfcWriteUnsupportedFields(const SpoolTagData &d, const String &for
     if (d.displayName.length()) add("displayName");
   }
   // TigerTag Standard: fixed 80-byte foreign layout (see pn5180WriteNtagTigerTag).
-  // The writer fills the 6 registry IDs, color, one weight-or-length "measure" value,
-  // 6 temperature/drying bytes, the remaining quantity (measure_available) and the
-  // display name (custom message) -- everything else this codebase otherwise carries
-  // has nowhere to go on this format.
+  // The writer fills the 6 registry IDs, colours 1-3 (transparent as colour 1's alpha,
+  // rainbow as the Rainbow aspect), one weight-or-length "measure" value, 6
+  // temperature/drying bytes, td, the remaining quantity (measure_available) and the
+  // display name (custom message) -- everything else this codebase otherwise carries has
+  // nowhere to go on this format.
   if (format == "tigerTag") {
     // Vendor and finish have no text field here, but they reach the tag as the brand and
     // aspect ids SpoolManagerExtended resolved them to -- lost only when that failed. The
@@ -2124,6 +2125,7 @@ void startWebServer() {
       ext["tigerTagMaterialId"] = e.tigerTagMaterialId;
       ext["tigerTagBrandId"] = e.tigerTagBrandId;
       ext["tigerTagAspectId"] = e.tigerTagAspectId;
+      ext["tigerTagAspect2Id"] = e.tigerTagAspect2Id;
       ext["tigerTagTypeId"] = e.tigerTagTypeId;
       ext["tigerTagDiameterId"] = e.tigerTagDiameterId;
       ext["tigerTagMeasureUnitId"] = e.tigerTagMeasureUnitId;
@@ -2533,6 +2535,7 @@ void startWebServer() {
     d.tigerTagMaterialId    = doc["tigerTagMaterialId"]    | -1L;
     d.tigerTagBrandId       = doc["tigerTagBrandId"]       | -1L;
     d.tigerTagAspectId      = doc["tigerTagAspectId"]      | -1L;
+    d.tigerTagAspect2Id     = doc["tigerTagAspect2Id"]     | -1L;
     d.tigerTagTypeId        = doc["tigerTagTypeId"]        | -1L;
     d.tigerTagDiameterId    = doc["tigerTagDiameterId"]    | -1L;
     d.tigerTagMeasureUnitId = doc["tigerTagMeasureUnitId"] | -1L;
