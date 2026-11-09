@@ -238,8 +238,9 @@ static const int NTAG_EXT_CRC_LEN = (NTAG_EXT_PAGE_CRC - NTAG_EXT_PAGE_START) * 
 //   40-42 colour 3 RGB           43 reserved              44-45 td x10 (u16)
 //   46-47 reserved               48-75 custom message (UTF-8, zero-padded)
 //   76-78 measure_available (u24) 79 reserved
-// The writer fills the custom message and measure_available. Everything else in
-// 32-79 stays 0; tag_info 0 means "unknown tag index/count" in the SDK.
+// The writer fills colours 2/3, td, the custom message and measure_available. The
+// timestamp, tag_info and the reserved bytes stay 0; tag_info 0 means "unknown tag
+// index/count" in the SDK.
 static const uint8_t TIGERTAG_PAGE_START = 4;
 static const int TIGERTAG_OFF_MESSAGE = 48;
 static const int TIGERTAG_MESSAGE_LEN = 28;
@@ -248,6 +249,20 @@ static const int TIGERTAG_OFF_AVAILABLE = 76;  // page 4 + 76/4 = page 23, bytes
 // flow only updates a tag in this unit: its reading is grams, and the same number on a
 // tag that counts in kg or in a length would be wrong in that unit.
 static const long TIGERTAG_UNIT_GRAMS = 21;
+// The aspects whose color_count in the SDK's database/id_aspect.json is above 1: they say
+// how many of the three colour fields are in use. Colours 2/3 have no presence flag of
+// their own, so a black second colour (0,0,0) is only told apart from "no second colour"
+// by one of these; see pn5180ReadNtagTigerTag. SpoolManagerExtended sends Bicolor,
+// Tricolor or Rainbow as tigerTagAspect2Id.
+static const uint8_t TIGERTAG_ASPECT_BICOLOR = 252;
+static const uint8_t TIGERTAG_ASPECT_TRICOLOR = 24;
+static const uint8_t TIGERTAG_ASPECT_RAINBOW = 145;
+// Colour 1's alpha (+19) for a transparent spool. The SDK documents 255 as fully opaque;
+// SpoolManagerExtended's "transparent:" flag has no degree, so 128 stands for
+// "see-through, degree unknown". The reader takes any value below 255 as transparent.
+static const uint8_t TIGERTAG_ALPHA_TRANSPARENT = 0x80;
+// td_raw (+44, u16 BE) is TD x10; the SDK documents 1-1000 as valid and 0 as undefined.
+static const uint16_t TIGERTAG_TD_RAW_MAX = 1000;
 static const uint32_t TIGERTAG_MAGIC_STANDARD = 0x5BF59264;  // unsigned, what we write
 // static const uint32_t TIGERTAG_MAGIC_PLUS = 0xBC0FCB97;  // signed variant -- never
 // written here, would need a private key we don't have.
@@ -301,9 +316,8 @@ struct SpoolTagData {
   int firstUseMinuteOfDay = -1, lastUseMinuteOfDay = -1, purchasedOnMinuteOfDay = -1;
   float cost = -1;                          // 2 decimal places
 
-  // Drying fields (OpenPrintTag spec keys 57/58) plus td (key 27). OPT and the three
-  // Extended layouts carry all three. The TigerTag writer fills the two drying fields
-  // (bytes 28/29) but not td, although the layout has a td byte pair at 44-45.
+  // Drying fields (OpenPrintTag spec keys 57/58) plus td (key 27). OPT, the three
+  // Extended layouts and TigerTag (bytes 28/29 and 44-45) carry all three.
   //
   // dryingTime is in MINUTES everywhere on THIS side of the boundary -- the OPT spec
   // unit, and what /nfcprobe reports and /nfcwritespool accepts. Per-layout conversion
@@ -323,6 +337,7 @@ struct SpoolTagData {
   // sending, same "plugin resolves, firmware just packs bytes" split already used
   // for every other format. -1 = not resolved/not set.
   long tigerTagMaterialId = -1, tigerTagBrandId = -1, tigerTagAspectId = -1;
+  long tigerTagAspect2Id = -1;  // second aspect (byte 11): the colour count, see TIGERTAG_ASPECT_BICOLOR
   long tigerTagTypeId = -1, tigerTagDiameterId = -1, tigerTagMeasureUnitId = -1;
 };
 
@@ -3410,6 +3425,24 @@ inline uint32_t pn5180TigerTagAvailable(float remaining, uint32_t measure) {
   return ((uint32_t)v > cap) ? cap : (uint32_t)v;
 }
 
+// Colour count an aspect id states (2 or 3), 1 for every other aspect.
+inline int pn5180TigerTagAspectColorCount(uint8_t aspect) {
+  if (aspect == TIGERTAG_ASPECT_TRICOLOR || aspect == TIGERTAG_ASPECT_RAINBOW) return 3;
+  if (aspect == TIGERTAG_ASPECT_BICOLOR) return 2;
+  return 1;
+}
+
+// td (+44) as stored: TD x10, rounded. A set value that would round to 0 is stored as
+// 0.1 instead -- 0 is this layout's "undefined", the same reasoning as the drying-time
+// floor in pn5180WriteNtagTigerTag. Above the SDK's range it is capped at 100.0.
+inline uint16_t pn5180TigerTagTdRaw(float td) {
+  if (td <= 0) return 0;
+  long raw = lroundf(td * 10.0f);
+  if (raw < 1) raw = 1;
+  if (raw > TIGERTAG_TD_RAW_MAX) raw = TIGERTAG_TD_RAW_MAX;
+  return (uint16_t)raw;
+}
+
 // Writes the TigerTag Standard (unsigned) layout -- see the constants block above for
 // the byte-offset table and its provenance. Unlike every OctoScale-native format,
 // this one has NO commit-marker discipline of its own (the SDK's discriminator is the
@@ -3463,7 +3496,9 @@ inline bool pn5180WriteNtagTigerTag(const SpoolTagData &d, int &bytesWrittenOut,
   uint16_t matId = (uint16_t)constrain(d.tigerTagMaterialId, 0, 0xFFFF);
   buf[8] = (uint8_t)(matId >> 8); buf[9] = (uint8_t)matId;
   buf[10] = (uint8_t)constrain(d.tigerTagAspectId, 0, 0xFF);
-  buf[11] = 0;  // Aspect2, unused (per peer: write 0)
+  // Aspect 2: SpoolManagerExtended sends "Bicolor"/"Tricolor" here for a spool with 2/3
+  // colours (see TIGERTAG_ASPECT_BICOLOR), 0 otherwise.
+  buf[11] = (d.tigerTagAspect2Id >= 0) ? (uint8_t)constrain(d.tigerTagAspect2Id, 0, 0xFF) : 0;
   buf[12] = (uint8_t)constrain(d.tigerTagTypeId, 0, 0xFF);
   buf[13] = (uint8_t)constrain(d.tigerTagDiameterId, 0, 0xFF);
   uint16_t brandId = (uint16_t)constrain(d.tigerTagBrandId, 0, 0xFFFF);
@@ -3471,7 +3506,11 @@ inline bool pn5180WriteNtagTigerTag(const SpoolTagData &d, int &bytesWrittenOut,
 
   uint8_t rgb[3] = {0, 0, 0};
   pn5180PrimaryColorRgb(d, rgb);  // leaves rgb zeroed if unparseable -- not an error
-  buf[16] = rgb[0]; buf[17] = rgb[1]; buf[18] = rgb[2]; buf[19] = 0xFF;  // A=opaque
+  buf[16] = rgb[0]; buf[17] = rgb[1]; buf[18] = rgb[2];
+  // Alpha: see TIGERTAG_ALPHA_TRANSPARENT. A rainbow spool has no colours at all (the
+  // grammar's "rainbow" carries none), so its three colour fields stay black and the
+  // Rainbow aspect (aspect 2, from SpoolManagerExtended) is what says what it is.
+  buf[19] = d.isTransparent ? TIGERTAG_ALPHA_TRANSPARENT : 0xFF;
 
   // Measure (offset 20-22, u24 BE): spool's total weight/length, whichever the
   // caller's measureUnitId denotes -- the firmware has no registry knowledge of what
@@ -3509,6 +3548,13 @@ inline bool pn5180WriteNtagTigerTag(const SpoolTagData &d, int &bytesWrittenOut,
   buf[30] = (d.bedTemperatureMin >= 0) ? (uint8_t)constrain(d.bedTemperatureMin, 0, 0xFF)
           : (d.bedTemperature >= 0)    ? (uint8_t)constrain(d.bedTemperature, 0, 0xFF) : 0;
   buf[31] = (d.bedTemperatureMax >= 0) ? (uint8_t)constrain(d.bedTemperatureMax, 0, 0xFF) : 0;
+
+  // Colours 2/3 (36-38, 40-42), RGB without alpha, like the SDK. Left 0 when the spool
+  // has fewer colours.
+  if (d.colorCount >= 2) memcpy(buf + 36, d.colorRgb[1], 3);
+  if (d.colorCount >= 3) memcpy(buf + 40, d.colorRgb[2], 3);
+  uint16_t tdRaw = pn5180TigerTagTdRaw(d.td);
+  buf[44] = (uint8_t)(tdRaw >> 8); buf[45] = (uint8_t)tdRaw;
 
   // Custom message (48-75): the spool's display name, the only free-text field in this
   // layout. Cut at a character boundary rather than at byte 28 -- the SDK's to_bytes()
@@ -3561,8 +3607,7 @@ inline bool pn5180ReadNtagTigerTag(SpoolTagData &out) {
 
   out.tigerTagMaterialId = (long)((buf[8] << 8) | buf[9]);
   out.tigerTagAspectId = (long)buf[10];
-  // buf[11] (Aspect2) intentionally not surfaced -- we never write anything but 0
-  // there and have no field to put it in; see the writer's comment.
+  out.tigerTagAspect2Id = (long)buf[11];
   out.tigerTagTypeId = (long)buf[12];
   out.tigerTagDiameterId = (long)buf[13];
   out.tigerTagBrandId = (long)((buf[14] << 8) | buf[15]);
@@ -3570,14 +3615,37 @@ inline bool pn5180ReadNtagTigerTag(SpoolTagData &out) {
   // No gate on the bytes here, deliberately: this is a fixed foreign layout with no
   // documented NOT_SET sentinel for the colour (see the writer's own note), so 0,0,0 is
   // black -- treating it as "unset" dropped the colour of every black spool, and unlike
-  // the Extended carriers there is no flag byte to consult. buf[19] is alpha, which we
-  // always write as 0xFF; it is NOT usable as a presence marker either, since a foreign
-  // writer may legitimately leave it at 0x00.
+  // the Extended carriers there is no flag byte to consult. buf[19] is not a presence
+  // marker either: it is colour 1's alpha, read as transparency below.
   out.colorRgb[0][0] = buf[16];
   out.colorRgb[0][1] = buf[17];
   out.colorRgb[0][2] = buf[18];
-  out.colorCount = 1;
-  {
+  // Colours 2/3 have no presence flag either. A non-zero value counts, and so does an
+  // aspect that states the colour count -- without that, a black second colour would
+  // vanish exactly like colour 1 once did (see above). Like the SDK, aspect 2 is asked
+  // first and aspect 1 only when aspect 2 states no count.
+  uint8_t modeAspect = (pn5180TigerTagAspectColorCount(buf[11]) > 1) ? buf[11] : buf[10];
+  int stated = pn5180TigerTagAspectColorCount(modeAspect);
+  bool c1 = (buf[16] | buf[17] | buf[18]) != 0;
+  bool c2 = (buf[36] | buf[37] | buf[38]) != 0;
+  bool c3 = (buf[40] | buf[41] | buf[42]) != 0;
+  memcpy(out.colorRgb[1], buf + 36, 3);
+  memcpy(out.colorRgb[2], buf + 40, 3);
+  // All three colour flags are set on both paths: this function must not depend on its
+  // caller having reset `out`.
+  if (modeAspect == TIGERTAG_ASPECT_RAINBOW && !c1 && !c2 && !c3) {
+    // SpoolManagerExtended's "rainbow": Rainbow aspect, no colours (see the writer). A
+    // Rainbow tag that names its three colours keeps them below instead.
+    out.isRainbow = true;
+    out.isTransparent = false;   // the grammar's "rainbow" stands alone
+    out.colorCount = 0;
+    out.color = "";
+  } else {
+    out.isRainbow = false;
+    out.colorCount = (c3 || stated == 3) ? 3 : (c2 || stated == 2) ? 2 : 1;
+    // Alpha below 255 = transparent (see TIGERTAG_ALPHA_TRANSPARENT). The five
+    // manufacturer tags checked on 2026-11-09 (OpenRFID's test dumps) all carry 255.
+    out.isTransparent = buf[19] < 0xFF;
     char hex[8]; snprintf(hex, sizeof(hex), "#%02X%02X%02X", buf[16], buf[17], buf[18]);
     out.color = String(hex);
   }
@@ -3596,6 +3664,8 @@ inline bool pn5180ReadNtagTigerTag(SpoolTagData &out) {
   out.dryingTime = (buf[29] > 0) ? (int)buf[29] * 60 : -1;  // byte is HOURS, our field is minutes
   out.bedTemperatureMin = (buf[30] > 0) ? (int)buf[30] : -1;
   out.bedTemperatureMax = (buf[31] > 0) ? (int)buf[31] : -1;
+  uint16_t tdRaw = ((uint16_t)buf[44] << 8) | buf[45];
+  out.td = (tdRaw >= 1 && tdRaw <= TIGERTAG_TD_RAW_MAX) ? tdRaw / 10.0f : -1.0f;
 
   // measure_available: 0 reads as "not known", not as an empty spool. The SDK's create()
   // starts it at measure and its blank template at 0, and OpenRFID PR #35 (not checked
