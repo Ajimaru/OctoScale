@@ -66,7 +66,10 @@ jobs:
             0x10000 .pio/build/esp32s3/firmware.bin
           cp .pio/build/esp32s3/firmware.bin release-artifacts/octoscale-ota.bin
 
-      - name: Create GitHub release
+      # Always a draft, like the OctoPrint plugin repos: a release is published by
+      # hand once the notes and the attached firmware have been checked. Pushing a
+      # tag must never publish on its own (v0.0.7 went live straight from the tag).
+      - name: Create GitHub release (draft)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -74,4 +77,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "OctoScale $GITHUB_REF_NAME" \
             --generate-notes \
-            --verify-tag
+            --verify-tag \
+            --draft
