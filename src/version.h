@@ -1,7 +1,7 @@
 #pragma once
 
 // Bump on release. Build timestamp is added automatically.
-#define FW_VERSION_RELEASE "0.0.6"
+#define FW_VERSION_RELEASE "0.0.7"
 
 // Dev builds get a running number appended ("x.x.x-devN") so a device can say exactly
 // which build is on it -- flashing the same release version twice is otherwise
